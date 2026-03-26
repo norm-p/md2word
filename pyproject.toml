@@ -1,0 +1,36 @@
+[project]
+name = "md2word"
+version = "0.1.0"
+description = "Convert Markdown to Word (.docx) — or update an existing Word document while preserving formatting."
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "click",
+    "python-dotenv",
+    "pypandoc",
+    "python-docx",
+    "docxtpl",
+    "openpyxl",
+    "lxml",
+    "markitdown[docx]",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic"]
+bedrock = ["anthropic[bedrock]"]
+vertex = ["anthropic[vertex]"]
+openai = ["openai"]
+all-ai = ["anthropic", "openai"]
+
+[project.scripts]
+md2word = "md2word.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/md2word"]
+
+[dependency-groups]
+dev = ["pytest"]

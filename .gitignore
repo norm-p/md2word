@@ -1,0 +1,81 @@
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.Trash-*
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# Python & Virtual Environments
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+
+# Local settings
+local/
+
+# Project-specific backups and drafts
+.originals/
+*_old.md
+*_backup.md
+*_draft.md
+
+# Bundled binaries (too large for git; see README for install instructions)
+tools/
+
+# Other
+.archive/
+.claude/worktrees/
+dev-docs/
+samples/
+skills/
+
+# Client documents and iteration artifacts (not part of the tool)
+OUTPUT-REVIEW-*.md
+ITERATION-PROCESS.md
+*.docx
+!tools/*.docx
+tools/pandoc.exe
