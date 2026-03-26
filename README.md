@@ -1,3 +1,5 @@
+![md2word](images/logo.png)
+
 # md2word
 
 Convert Markdown to Word (.docx) -- or **update an existing Word document** from a revised Markdown source while preserving formatting, styles, images, and tables.

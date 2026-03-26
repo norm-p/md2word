@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run:*)",
+      "Bash(ls -la /mnt/c/Users/NormPearson/md-to-word/Fiserv Inc-Cognizant-FF-223571_v1_v00*.docx)",
+      "Bash(ls -la /mnt/c/Users/NormPearson/md-to-word/Fiserv*.docx)",
+      "Bash(ls /mnt/c/Users/NormPearson/md-to-word/*.docx /mnt/c/Users/NormPearson/md-to-word/*.md)",
+      "Bash(ls -1 /mnt/c/Users/NormPearson/md-to-word/OUTPUT-REVIEW*.md /mnt/c/Users/NormPearson/md-to-word/CHECKPOINT.md)"
+    ]
+  }
+}
