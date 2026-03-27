@@ -44,15 +44,3 @@ These are its known quirks:
 | Occasional bullet reordering | The AI may subtly reorder 1-2 bullets in a long list when regenerating a section | AI mode |
 | Heading level drift | The AI occasionally renders a heading at the wrong level | AI mode |
 | Double space collapse | Multiple consecutive spaces are reduced to one | Both modes |
-
-## Previously resolved
-
-These were significant issues found and fixed during development:
-
-| Issue | What happened | How it was fixed |
-|-------|--------------|-----------------|
-| Content loss in large sections | A large Markdown section mapped to a small DOCX section, losing embedded sub-sections | Post-mapping re-split detects embedded headings and creates separate mappings |
-| Table content loss | AI output dropped complex tables entirely | Original tables are rescued when AI output has none or fewer than 50% of rows |
-| Duplicated content across sections | AI regenerated content that already existed in adjacent sections | Three-pass deduplication scans for and removes duplicated paragraphs |
-| Table row insertion order | Rows inserted in wrong order when multiple rows added to same table | Switched from index-based to stable element references for insertion anchors |
-| Underscore corruption in tables | Identifiers like `GFS_CTS_DEX` became `GFS\CTS\DEX` | Separate table-cell text cleaner that preserves literal underscores |

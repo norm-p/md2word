@@ -8,7 +8,7 @@ final output, covering **create mode**, **update mode** (AI-augmented), and
 
 ## High-Level Pipeline
 
-![High-Level Pipeline](diagrams/High-Level%20Pipeline-2026-03-26-133243.png)
+![High-Level Pipeline](images/High-Level%20Pipeline-2026-03-26-133243.png)
 
 | Step | Logic | Description |
 |------|-------|-------------|
@@ -21,7 +21,7 @@ final output, covering **create mode**, **update mode** (AI-augmented), and
 
 ## Create Mode (pandoc.py)
 
-![Create Mode](diagrams/Create%20Mode-2026-03-26-133236.png)
+![Create Mode](images/Create%20Mode-2026-03-26-133236.png)
 
 Straight conversion via the bundled `pandoc.exe` (WSL) or system pandoc.
 When `--ref-doc` is provided, the output inherits fonts, colors, and named
@@ -38,7 +38,7 @@ converted with `wslpath -w` and pandoc is called directly via `subprocess`
 The update pipeline is a multi-step process that preserves the base DOCX's
 formatting while applying content changes from the Markdown source.
 
-![Update Mode](diagrams/Update%20Mode-2026-03-26-133210.png)
+![Update Mode](images/Update%20Mode-2026-03-26-133210.png)
 
 **Color key**: Blue = inputs, Orange = AI-powered steps, all others = deterministic.
 
@@ -97,7 +97,7 @@ whitespace, lowercase.
 
 ### Step 5: Edit Plan (ai/edit_plan.py) -- AI-Powered
 
-![Edit Plan (AI-Enabled)](diagrams/Edit%20Plan%20(AI-Enabled)-2026-03-26-133227.png)
+![Edit Plan (AI-Enabled)](images/Edit%20Plan%20(AI-Enabled)-2026-03-26-133227.png)
 
 - Sections >8000 chars are isolated in their own batch with a 32K token budget.
 - The LLM receives a **structural summary** of existing XML (paragraph count,
@@ -121,7 +121,7 @@ list summarizing what changed. Displayed at the CLI for y/n confirmation.
 The core assembly step, processing edits in **reverse order** to keep element
 indices stable.
 
-![XML Surgery](diagrams/XML%20Surgery-2026-03-26-133202.png)
+![XML Surgery](images/XML%20Surgery-2026-03-26-133202.png)
 
 **Element preservation**: The LLM cannot reliably regenerate complex OOXML
 structures (images, tables with merged cells/borders). When the LLM produces
@@ -150,7 +150,7 @@ corrections applied, and table rows spliced -- without LLM involvement.
 When update mode detects that neither the MD nor the DOCX have section
 structure, it automatically falls back to create mode.
 
-![Create-Mode Fallback](diagrams/Create-Mode%20Fallback-2026-03-26-133219.png)
+![Create-Mode Fallback](images/Create-Mode%20Fallback-2026-03-26-133219.png)
 
 **Trigger conditions** (all must be true):
 - DOCX has exactly one section: `(preamble)` (no heading styles)
@@ -164,7 +164,7 @@ structure, it automatically falls back to create mode.
 When no AI provider is configured (no `AI_MODEL` / API key in `.env`, or the AI
 SDK is not installed), update mode runs without any LLM calls.
 
-![Deterministic-Only Mode](diagrams/Deterministic-Only%20Mode-2026-03-26-133152.png)
+![Deterministic-Only Mode](images/Deterministic-Only%20Mode-2026-03-26-133152.png)
 
 **What works without AI:**
 - Heading-based section matching (exact, case-insensitive, and fuzzy)
@@ -203,7 +203,7 @@ deterministic Python with lxml.
 
 ## Error Handling and Recovery
 
-![Error Handling and Recovery](diagrams/Error%20Handling%20and%20Recovery-2026-03-26-133142.png)
+![Error Handling and Recovery](images/Error%20Handling%20and%20Recovery-2026-03-26-133142.png)
 
 The pipeline is designed to degrade gracefully. Individual section failures
 produce warnings but do not block the rest of the document. Only whole-document
