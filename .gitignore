@@ -76,6 +76,5 @@ skills/
 # Client documents and iteration artifacts (not part of the tool)
 OUTPUT-REVIEW-*.md
 ITERATION-PROCESS.md
-*.docx
 !tools/*.docx
 tools/pandoc.exe

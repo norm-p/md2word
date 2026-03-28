@@ -158,6 +158,20 @@ src/md2word/
 
 **Design principle:** AI is used only where semantic judgment is needed (section alignment, OOXML generation, change summarization). Everything else -- mode detection, conflict scanning, text similarity, XML manipulation, validation -- is deterministic Python with [lxml](https://lxml.de/).
 
+## Building a standalone .exe
+
+You can package md2word as a single self-contained Windows executable (includes pandoc -- no Python or other dependencies needed at runtime).
+
+**Requirements:** Windows (or WSL), Python 3.12+, pandoc installed and on PATH
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_exe.ps1
+```
+
+This installs PyInstaller and project dependencies via pip, then produces `dist\md2word.exe` (~80 MB). The build script is idempotent -- run it again after code changes to rebuild.
+
+To use the exe with AI features, place a `.env` file in the working directory with your provider config (see [Supported AI providers](#supported-ai-providers)).
+
 ## Contributing
 
 Contributions are welcome. The codebase follows a clear separation: AI logic lives in `src/md2word/ai/`, deterministic approaches in `src/md2word/approaches/`. See `CLAUDE.md` for detailed architecture notes and `WORKFLOW.md` for the full pipeline documentation with diagrams.
