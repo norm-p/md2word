@@ -40,9 +40,7 @@ These are its known quirks:
 
 | Issue | Description | Affects |
 |-------|-------------|---------|
-| Sub-heading duplication | The AI may emit a sub-heading as a plain paragraph, duplicating text already present from the original section | AI mode |
-| Stale table values in AI sections | When the AI regenerates a section containing a table, it may use the original DOCX values instead of the updated Markdown values | AI mode |
-| Empty heading before Schedule | A heading-styled paragraph with no visible text may survive into the output | Both modes |
+| Sub-heading duplication | The AI may emit a sub-heading as a plain paragraph, duplicating text already present from the original section. Most within-section duplicates are removed automatically; a cross-section duplicate may remain (1 extra occurrence). | AI mode |
 | Occasional bullet reordering | The AI may subtly reorder 1-2 bullets in a long list when regenerating a section | AI mode |
 | Heading level drift | The AI occasionally renders a heading at the wrong level | AI mode |
 | Double space collapse | Multiple consecutive spaces are reduced to one | Both modes |
@@ -50,6 +48,27 @@ These are its known quirks:
 ## Recent fixes
 
 Fixes are listed newest-first with the review that introduced them.
+
+### R25 -- Stale table values in AI and unmatched sections
+
+- **Stale table cell values corrected in AI-regenerated sections.** When the AI
+  regenerates a section containing a table, deterministic table row patching now
+  runs as a second pass to correct any stale values the AI carried over from the
+  original DOCX. Previously, only unchanged sections received table patching.
+- **Unmatched DOCX sections receive table patching.** DOCX sections whose
+  headings do not match any Markdown section (and therefore pass through
+  unchanged) now receive deterministic table row patching using the full
+  Markdown text. This corrects stale values in sections that were previously
+  unreachable by the patching infrastructure.
+
+### R24 -- Duplicate paragraph removal and empty heading cleanup
+
+- **Consecutive duplicate paragraphs removed.** After AI replacement, adjacent
+  paragraphs with identical normalized text are detected and the duplicate is
+  removed. This eliminates within-section sub-heading duplication.
+- **Empty heading paragraphs removed.** A post-edit scan removes heading-styled
+  paragraphs with no visible text, catching empty headings that the section-level
+  filter could not reach.
 
 ### R23 -- Bold-aware table patching and SDT handling
 

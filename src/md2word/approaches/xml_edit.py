@@ -1792,8 +1792,13 @@ def _patch_text_corrections(
     return corrected
 
 
-def _apply_patches(document_xml_bytes: bytes, mappings: list[SectionMapping]) -> tuple[bytes, int, int, int, int, int]:
-    """Apply Options B, C, and D to all sections marked 'unchanged'.
+def _apply_patches(
+    document_xml_bytes: bytes,
+    mappings: list[SectionMapping],
+    full_md: str = "",
+) -> tuple[bytes, int, int, int, int, int]:
+    """Apply Options B, C, and D to all mapped sections, plus table patching
+    on unmatched DOCX sections.
 
     Returns (modified_xml_bytes, bullets_inserted, paragraphs_corrected,
              table_rows_updated, table_rows_inserted, table_rows_removed).
@@ -1852,9 +1857,10 @@ def _apply_patches(document_xml_bytes: bytes, mappings: list[SectionMapping]) ->
             total_bullets += bullets
             click.echo(f"  Inserted {bullets} new bullet(s) in '{heading_text}'")
 
-    # Second pass: text corrections for LLM-edited sections (Option C-edit).
-    # Uses a tighter threshold (0.90) to only fix near-exact mismatches
-    # where the LLM got close but dropped/changed a word.
+    # Second pass: table + text corrections for LLM-edited sections.
+    # Option D patches stale table cell values the LLM carried over from the
+    # original DOCX (e.g. wrong dates).  Option C-edit (0.90 threshold) fixes
+    # near-exact paragraph mismatches where the LLM dropped/changed a word.
     for mapping in mappings:
         if mapping.action != "replace" or mapping.docx_section is None:
             continue
@@ -1864,6 +1870,29 @@ def _apply_patches(document_xml_bytes: bytes, mappings: list[SectionMapping]) ->
         except ValueError:
             continue
         section_elements = list(body)[start_idx:end_idx]
+
+        # Option D on LLM-edited sections: correct stale table cell values
+        rows_updated, rows_inserted, rows_removed = _patch_table_rows(
+            section_elements, mapping.md_content, body
+        )
+        if rows_updated or rows_inserted or rows_removed:
+            total_rows_updated += rows_updated
+            total_rows_inserted += rows_inserted
+            total_rows_removed += rows_removed
+            parts = []
+            if rows_updated:
+                parts.append(f"{rows_updated} row(s) updated")
+            if rows_inserted:
+                parts.append(f"{rows_inserted} row(s) inserted")
+            if rows_removed:
+                parts.append(f"{rows_removed} stale row(s) removed")
+            click.echo(
+                f"  Post-LLM table patch in '{heading_text}': {', '.join(parts)}"
+            )
+            # Refresh after table modifications
+            start_idx, end_idx = _find_section_range(body, heading_text)
+            section_elements = list(body)[start_idx:end_idx]
+
         corrections = _patch_text_corrections(
             section_elements, mapping.md_content, min_ratio=0.90
         )
@@ -1872,6 +1901,65 @@ def _apply_patches(document_xml_bytes: bytes, mappings: list[SectionMapping]) ->
             click.echo(
                 f"  Post-LLM corrected {corrections} paragraph(s) in '{heading_text}'"
             )
+
+    # Third pass: Option D on unmatched DOCX sections that contain tables.
+    # Some DOCX sections (e.g., sub-headings like "HIGH LEVEL IMPLEMENTATION
+    # PLAN") are not matched to any MD section and pass through as-is.  Their
+    # tables may contain stale values that the full source MD can correct.
+    if full_md:
+        mapped_headings = set()
+        for m in mappings:
+            if m.docx_section is not None:
+                mapped_headings.add(m.docx_section.heading)
+
+        # Walk the body to find heading-delimited sections not in the mapping
+        children = list(body)
+        i = 0
+        while i < len(children):
+            child = children[i]
+            if child.tag != f"{{{_W}}}p":
+                i += 1
+                continue
+            heading_text = _para_heading_text(child)
+            if heading_text is None or not heading_text.strip():
+                i += 1
+                continue
+            if heading_text in mapped_headings:
+                i += 1
+                continue
+            # Found an unmatched heading — collect its section elements
+            sec_start = i
+            sec_end = i + 1
+            while sec_end < len(children):
+                c = children[sec_end]
+                if c.tag == f"{{{_W}}}p" and _para_heading_text(c) is not None:
+                    break
+                sec_end += 1
+            section_elements = children[sec_start:sec_end]
+            # Only bother if section has tables
+            has_tables = any(
+                e.tag == f"{{{_W}}}tbl" for e in section_elements
+            )
+            if has_tables:
+                rows_updated, rows_inserted, rows_removed = _patch_table_rows(
+                    section_elements, full_md, body
+                )
+                if rows_updated or rows_inserted or rows_removed:
+                    total_rows_updated += rows_updated
+                    total_rows_inserted += rows_inserted
+                    total_rows_removed += rows_removed
+                    parts = []
+                    if rows_updated:
+                        parts.append(f"{rows_updated} row(s) updated")
+                    if rows_inserted:
+                        parts.append(f"{rows_inserted} row(s) inserted")
+                    if rows_removed:
+                        parts.append(f"{rows_removed} stale row(s) removed")
+                    click.echo(
+                        f"  Unmatched section table patch in "
+                        f"'{heading_text}': {', '.join(parts)}"
+                    )
+            i = sec_end
 
     if total_bullets or total_corrections or total_rows_updated or total_rows_inserted or total_rows_removed:
         return (
@@ -2647,7 +2735,7 @@ def run(
 
     # 7c. Options B, C, D: patch unchanged sections (bullets, text corrections, table rows)
     click.echo("Patching unchanged sections...")
-    modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed = _apply_patches(modified_xml, mapping)
+    modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed = _apply_patches(modified_xml, mapping, full_md=md_text)
     if bullets_added or corrections_made or rows_updated or rows_inserted or rows_removed:
         parts = [
             f"{bullets_added} bullet(s) added",
