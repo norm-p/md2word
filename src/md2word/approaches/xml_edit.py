@@ -464,6 +464,37 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
                         body.remove(elem)
                         new_elements.remove(elem)
                         tail_pos -= 1
+            # Fix B3: Remove consecutive duplicate paragraphs in LLM output.
+            # The LLM sometimes emits the same sub-heading or intro paragraph
+            # twice in a row (e.g. "Delivery Experience Framework" x2).
+            # Compare adjacent paragraph texts; remove the second if identical.
+            prev_text: str | None = None
+            b3_remove: list[etree._Element] = []
+            for elem in new_elements:
+                if elem.tag != f"{{{_W}}}p":
+                    prev_text = None
+                    continue
+                para_text = _normalize_text(
+                    "".join(
+                        (t.text or "")
+                        for t in elem.findall(f".//{{{_W}}}t")
+                    )
+                )
+                if not para_text:
+                    prev_text = None
+                    continue
+                if para_text == prev_text:
+                    b3_remove.append(elem)
+                else:
+                    prev_text = para_text
+            for elem in b3_remove:
+                body.remove(elem)
+                new_elements.remove(elem)
+                tail_pos -= 1
+                click.echo(
+                    f"  Removed consecutive duplicate paragraph in "
+                    f"'{edit.target_heading}'"
+                )
             # Preserve images: if original had drawings and new content has none, re-append them
             if old_drawing_paras and not any(
                 e.find(f".//{{{_W}}}drawing") is not None for e in new_elements
@@ -543,6 +574,28 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
                 f"  Warning: insert anchor '{edit.target_heading}' not found "
                 "— SKIPPING insert (content not placed)."
             )
+
+    # Final cleanup: remove heading-styled paragraphs with no visible text.
+    # These are structural artifacts (e.g., empty Heading2 at the end of a
+    # section) that the section-level filter can't catch because they're
+    # embedded within non-empty sections rather than being standalone sections.
+    # _para_heading_text() returns "" (not None) for headings with no text.
+    empty_heading_count = 0
+    for child in list(body):
+        if child.tag != f"{{{_W}}}p":
+            continue
+        heading_text = _para_heading_text(child)
+        if heading_text is None:
+            continue  # not a heading paragraph
+        if heading_text.strip():
+            continue  # heading has visible text — keep
+        # It's a heading-styled paragraph with no visible text — remove it
+        body.remove(child)
+        empty_heading_count += 1
+    if empty_heading_count:
+        click.echo(
+            f"  Removed {empty_heading_count} empty heading paragraph(s)"
+        )
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
