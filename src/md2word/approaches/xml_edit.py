@@ -933,6 +933,57 @@ def _patch_new_bullets(
     return changed
 
 
+def _remove_stale_bullets(
+    body: etree._Element,
+    section_elements: list[etree._Element],
+    md_content: str,
+) -> int:
+    """Option E: remove DOCX bullets that have no match in the source MD.
+
+    After Option B has added/updated bullets, any DOCX list paragraph whose
+    best match against ALL source MD bullets is below 0.50 is considered stale
+    (the user removed it from the MD) and is deleted.
+
+    Returns the number of bullets removed.
+    """
+    from difflib import SequenceMatcher
+
+    # Gather cleaned MD bullet texts
+    md_bullets: list[str] = []
+    for m in _MD_BULLET_RE.finditer(md_content):
+        cleaned = _clean_md_inline(m.group(1).strip())
+        if cleaned:
+            md_bullets.append(cleaned.lower())
+    if not md_bullets:
+        return 0
+
+    list_paras = [
+        e for e in section_elements
+        if e.tag == f"{{{_W}}}p" and _is_list_para(e)
+    ]
+    if not list_paras:
+        return 0
+
+    stale: list[etree._Element] = []
+    for p in list_paras:
+        docx_text = _clean_md_inline(
+            "".join(t.text or "" for t in p.findall(f".//{{{_W}}}t")).strip()
+        ).lower()
+        if not docx_text:
+            continue
+        best = max(
+            SequenceMatcher(None, docx_text, mb, autojunk=False).ratio()
+            for mb in md_bullets
+        )
+        if best < 0.50:
+            stale.append(p)
+
+    for p in stale:
+        body.remove(p)
+
+    return len(stale)
+
+
 def _iter_section_paragraphs(section_elements: list[etree._Element]):
     """Yield all w:p elements in section, including those inside table cells."""
     for elem in section_elements:
@@ -1792,16 +1843,235 @@ def _patch_text_corrections(
     return corrected
 
 
+# ---------------------------------------------------------------------------
+# Option C+bold — Apply **bold** emphasis from source MD to DOCX runs
+# ---------------------------------------------------------------------------
+
+_BOLD_SPAN_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _patch_bold_emphasis(
+    section_elements: list[etree._Element],
+    md_content: str,
+) -> int:
+    """Apply **bold** markers from source MD to matching DOCX paragraph runs.
+
+    For each DOCX paragraph, finds the best-matching MD line (≥0.75 similarity),
+    extracts bold spans from that specific MD line, and applies them using
+    word-boundary-aware matching.  This prevents cross-paragraph leakage and
+    substring false positives (e.g. "not" inside "notice").
+
+    Returns the number of bold spans applied.
+    """
+    from difflib import SequenceMatcher
+
+    # Build per-line bold map: for each MD line, extract (cleaned_line, [(phrase, position_ratio)])
+    # position_ratio = where in the cleaned line the phrase appears (0.0–1.0)
+    md_line_data: list[tuple[str, list[tuple[str, float]]]] = []
+    for line in md_content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        bold_matches = list(_BOLD_SPAN_RE.finditer(stripped))
+        if not bold_matches:
+            continue
+        cleaned = _BOLD_SPAN_RE.sub(lambda m: m.group(1), stripped)
+        cleaned_lower = _clean_md_inline(cleaned)
+        if not cleaned_lower:
+            continue
+        phrases_with_pos: list[tuple[str, float]] = []
+        # Calculate position by counting how many chars precede each bold match
+        # after removing all ** markers
+        for bm in bold_matches:
+            phrase = bm.group(1).strip()
+            if not phrase:
+                continue
+            # Characters before this match in the original line
+            before_match = stripped[:bm.start()]
+            # Remove ** markers from the prefix to get true character position
+            before_clean = before_match.replace("**", "")
+            # Total line length without markers
+            total_clean = stripped.replace("**", "")
+            ratio = len(before_clean) / max(len(total_clean), 1)
+            phrases_with_pos.append((phrase, ratio))
+        if phrases_with_pos:
+            md_line_data.append((cleaned_lower, phrases_with_pos))
+
+    if not md_line_data:
+        return 0
+
+    applied = 0
+
+    for elem in section_elements:
+        if elem.tag != f"{{{_W}}}p":
+            continue
+        if _para_heading_text(elem) is not None:
+            continue
+        runs = elem.findall(f"{{{_W}}}r")
+        if not runs:
+            continue
+
+        # Get paragraph text
+        full_text_parts: list[str] = []
+        run_boundaries: list[tuple[int, int, etree._Element]] = []
+        pos = 0
+        for r in runs:
+            rtxt = "".join(t.text or "" for t in r.findall(f"{{{_W}}}t"))
+            run_boundaries.append((pos, pos + len(rtxt), r))
+            full_text_parts.append(rtxt)
+            pos += len(rtxt)
+        full_text = "".join(full_text_parts)
+        if not full_text:
+            continue
+
+        # Find the best-matching MD line for this paragraph
+        para_clean = _clean_md_inline(full_text.strip())
+        if not para_clean:
+            continue
+        best_ratio = 0.0
+        best_phrases: list[tuple[str, float]] = []
+        for md_clean, phrases_with_pos in md_line_data:
+            ratio = SequenceMatcher(
+                None, para_clean.lower(), md_clean.lower(), autojunk=False
+            ).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_phrases = phrases_with_pos
+        if best_ratio < 0.75 or not best_phrases:
+            continue
+
+        # Apply each bold phrase from the matched MD line
+        para_modified = False
+        for phrase, pos_ratio in best_phrases:
+            # Word-boundary-aware search in paragraph text
+            escaped = re.escape(phrase)
+            pattern = re.compile(
+                r"(?<![a-zA-Z])" + escaped + r"(?![a-zA-Z])",
+                re.IGNORECASE,
+            )
+            # Find ALL occurrences and pick the one closest to the
+            # expected position ratio within the paragraph
+            all_matches = list(pattern.finditer(full_text))
+            if not all_matches:
+                continue
+            if len(all_matches) == 1:
+                match = all_matches[0]
+            else:
+                # Pick occurrence closest to the position ratio from the MD line
+                best_match = all_matches[0]
+                best_dist = float("inf")
+                for m in all_matches:
+                    m_ratio = m.start() / max(len(full_text), 1)
+                    dist = abs(m_ratio - pos_ratio)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_match = m
+                match = best_match
+
+            idx = match.start()
+            phrase_end = match.end()
+
+            # Check if already bold
+            already_bold = True
+            for rstart, rend, relem in run_boundaries:
+                if rstart >= phrase_end or rend <= idx:
+                    continue
+                rpr = relem.find(f"{{{_W}}}rPr")
+                if rpr is None or rpr.find(f"{{{_W}}}b") is None:
+                    already_bold = False
+                    break
+            if already_bold:
+                continue
+
+            # Split runs at phrase boundaries and apply bold
+            new_runs: list[etree._Element] = []
+            for rstart, rend, relem in run_boundaries:
+                rtxt = "".join(t.text or "" for t in relem.findall(f"{{{_W}}}t"))
+                bold_start_in_run = max(idx, rstart) - rstart
+                bold_end_in_run = min(phrase_end, rend) - rstart
+
+                if rstart >= phrase_end or rend <= idx:
+                    new_runs.append(relem)
+                    continue
+
+                # This run overlaps the bold range — split it
+                before = rtxt[:bold_start_in_run]
+                bold_part = rtxt[bold_start_in_run:bold_end_in_run]
+                after = rtxt[bold_end_in_run:]
+
+                for seg_text, is_bold in [
+                    (before, False), (bold_part, True), (after, False)
+                ]:
+                    if not seg_text:
+                        continue
+                    new_r = copy.deepcopy(relem)
+                    t_elems = new_r.findall(f"{{{_W}}}t")
+                    if t_elems:
+                        t_elems[0].text = seg_text
+                        t_elems[0].set(
+                            "{http://www.w3.org/XML/1998/namespace}space",
+                            "preserve",
+                        )
+                        for extra in t_elems[1:]:
+                            new_r.remove(extra)
+                    else:
+                        t_elem = etree.SubElement(new_r, f"{{{_W}}}t")
+                        t_elem.text = seg_text
+                        t_elem.set(
+                            "{http://www.w3.org/XML/1998/namespace}space",
+                            "preserve",
+                        )
+                    if is_bold:
+                        rpr = new_r.find(f"{{{_W}}}rPr")
+                        if rpr is None:
+                            rpr = etree.SubElement(new_r, f"{{{_W}}}rPr")
+                            new_r.insert(0, rpr)
+                        if rpr.find(f"{{{_W}}}b") is None:
+                            etree.SubElement(rpr, f"{{{_W}}}b")
+                        if rpr.find(f"{{{_W}}}bCs") is None:
+                            etree.SubElement(rpr, f"{{{_W}}}bCs")
+                    new_runs.append(new_r)
+
+            # Replace runs in paragraph
+            if len(new_runs) != len(run_boundaries) or any(
+                nr is not orig for nr, (_, _, orig) in zip(new_runs, run_boundaries)
+            ):
+                for r in runs:
+                    elem.remove(r)
+                for nr in new_runs:
+                    elem.append(nr)
+                para_modified = True
+                # Rebuild for next phrase in same paragraph
+                runs = elem.findall(f"{{{_W}}}r")
+                full_text_parts = []
+                run_boundaries = []
+                pos = 0
+                for r in runs:
+                    rtxt = "".join(
+                        t.text or "" for t in r.findall(f"{{{_W}}}t")
+                    )
+                    run_boundaries.append((pos, pos + len(rtxt), r))
+                    full_text_parts.append(rtxt)
+                    pos += len(rtxt)
+                full_text = "".join(full_text_parts)
+
+        if para_modified:
+            applied += 1
+
+    return applied
+
+
 def _apply_patches(
     document_xml_bytes: bytes,
     mappings: list[SectionMapping],
     full_md: str = "",
-) -> tuple[bytes, int, int, int, int, int]:
-    """Apply Options B, C, and D to all mapped sections, plus table patching
-    on unmatched DOCX sections.
+) -> tuple[bytes, int, int, int, int, int, int, int]:
+    """Apply Options B, C, C+bold, D, and E to all mapped sections, plus
+    table patching on unmatched DOCX sections.
 
     Returns (modified_xml_bytes, bullets_inserted, paragraphs_corrected,
-             table_rows_updated, table_rows_inserted, table_rows_removed).
+             table_rows_updated, table_rows_inserted, table_rows_removed,
+             bullets_removed, bold_spans_applied).
     """
     root = etree.fromstring(document_xml_bytes)
     body = root.find(f"{{{_W}}}body")
@@ -1809,7 +2079,9 @@ def _apply_patches(
         return document_xml_bytes, 0, 0, 0, 0
 
     total_bullets = 0
+    total_bullets_removed = 0
     total_corrections = 0
+    total_bold_applied = 0
     total_rows_updated = 0
     total_rows_inserted = 0
     total_rows_removed = 0
@@ -1852,10 +2124,29 @@ def _apply_patches(
             total_corrections += corrections
             click.echo(f"  Corrected {corrections} paragraph(s) in '{heading_text}'")
 
+        # Option C+bold: apply **bold** emphasis from source MD
+        bold_applied = _patch_bold_emphasis(section_elements, mapping.md_content)
+        if bold_applied:
+            total_bold_applied += bold_applied
+            click.echo(f"  Applied bold to {bold_applied} span(s) in '{heading_text}'")
+
         bullets = _patch_new_bullets(body, section_elements, end_idx, mapping.md_content)
         if bullets:
             total_bullets += bullets
             click.echo(f"  Inserted {bullets} new bullet(s) in '{heading_text}'")
+
+        # Option E: remove DOCX bullets not present in source MD.
+        # Refresh section_elements after Option B insertions.
+        try:
+            start_idx, end_idx = _find_section_range(body, heading_text)
+        except ValueError:
+            pass
+        else:
+            section_elements = list(body)[start_idx:end_idx]
+            removed = _remove_stale_bullets(body, section_elements, mapping.md_content)
+            if removed:
+                total_bullets_removed += removed
+                click.echo(f"  Removed {removed} stale bullet(s) in '{heading_text}'")
 
     # Second pass: table + text corrections for LLM-edited sections.
     # Option D patches stale table cell values the LLM carried over from the
@@ -1936,7 +2227,17 @@ def _apply_patches(
                     break
                 sec_end += 1
             section_elements = children[sec_start:sec_end]
-            # Only bother if section has tables
+            # Option C: text corrections on unmatched sections
+            corrections = _patch_text_corrections(
+                section_elements, full_md, min_ratio=0.80
+            )
+            if corrections:
+                total_corrections += corrections
+                click.echo(
+                    f"  Corrected {corrections} paragraph(s) in "
+                    f"'{heading_text}'"
+                )
+            # Option D: table row patching on unmatched sections
             has_tables = any(
                 e.tag == f"{{{_W}}}tbl" for e in section_elements
             )
@@ -1961,7 +2262,7 @@ def _apply_patches(
                     )
             i = sec_end
 
-    if total_bullets or total_corrections or total_rows_updated or total_rows_inserted or total_rows_removed:
+    if total_bullets or total_bullets_removed or total_corrections or total_bold_applied or total_rows_updated or total_rows_inserted or total_rows_removed:
         return (
             etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
             total_bullets,
@@ -1969,8 +2270,10 @@ def _apply_patches(
             total_rows_updated,
             total_rows_inserted,
             total_rows_removed,
+            total_bullets_removed,
+            total_bold_applied,
         )
-    return document_xml_bytes, 0, 0, 0, 0, 0
+    return document_xml_bytes, 0, 0, 0, 0, 0, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -2375,13 +2678,107 @@ def run(
         for s in docx_sections:
             click.echo(f"    [H{s.heading_level}] {s.heading!r}")
 
-    # 3. Map MD sections to DOCX sections
-    if client is not None:
-        click.echo("Mapping sections (AI)...")
-        mapping = map_sections(client, md_text, docx_sections)
-    else:
-        click.echo("Mapping sections (deterministic)...")
-        mapping = map_sections_deterministic(md_text, docx_sections)
+    # 3. Pre-comparison: convert base DOCX to MD, diff against source MD.
+    # This tells us exactly what changed, avoiding unnecessary LLM calls.
+    heading_renames: dict[str, str] = {}  # base_heading → source_heading
+    precompare_used = False
+    try:
+        from markitdown import MarkItDown as _MID
+        from ..ai.pre_compare import (
+            pre_compare, pre_compare_overall_similarity,
+            map_sections_precompare,
+        )
+        click.echo("Pre-comparing base document against source...")
+        _mid = _MID()
+        _base_result = _mid.convert(str(target))
+        _base_md = _base_result.text_content
+
+        _diffs = pre_compare(_base_md, md_text)
+        _reliability = pre_compare_overall_similarity(_diffs)
+
+        n_identical = sum(1 for d in _diffs if d.action == "identical")
+        n_minor = sum(1 for d in _diffs if d.action == "minor_edit")
+        n_major = sum(1 for d in _diffs if d.action == "major_change")
+        n_new = sum(1 for d in _diffs if d.action == "new")
+        n_renamed = sum(1 for d in _diffs if d.heading_renamed)
+        click.echo(
+            f"  {len(_diffs)} sections: {n_identical} identical, "
+            f"{n_minor} minor edit, {n_major} major change, {n_new} new"
+            + (f", {n_renamed} heading rename(s)" if n_renamed else "")
+        )
+
+        if _reliability >= 0.50:
+            precompare_used = True
+            # Collect heading renames for later XML patching.
+            for d in _diffs:
+                if d.heading_renamed and d.base_heading is not None:
+                    heading_renames[d.base_heading] = d.source_heading
+            click.echo("Mapping sections (pre-comparison)...")
+            mapping = map_sections_precompare(_diffs, docx_sections)
+        else:
+            click.echo(
+                f"  Pre-comparison unreliable ({_reliability:.0%} match) "
+                f"— falling back to {'AI' if client else 'deterministic'} mapping"
+            )
+        # Detect heading renames for non-MD headings: DOCX headings that
+        # appear as all-caps body text lines in the source MD.  Only fires
+        # when the candidate line shares the DOCX heading's distinctive words
+        # (not just boilerplate like "EXHIBIT X TO SOW#").
+        if precompare_used:
+            from difflib import SequenceMatcher as _SM
+            mapped_headings = {
+                m.md_heading for m in mapping if m.docx_section is not None
+            }
+            _used_renames: set[str] = set()
+            for ds in docx_sections:
+                if ds.heading in mapped_headings:
+                    continue
+                if ds.heading in heading_renames:
+                    continue
+                dh_norm = ds.heading.strip().upper()
+                if len(dh_norm) < 10:
+                    continue
+                best_sim = 0.0
+                best_line: str | None = None
+                for line in md_text.splitlines():
+                    sl = line.strip()
+                    if not sl or sl.startswith("#") or sl.startswith("|"):
+                        continue
+                    if sl != sl.upper():
+                        continue
+                    sl_clean = _clean_md_inline(sl).upper()
+                    if sl_clean in _used_renames:
+                        continue
+                    sim = _SM(None, dh_norm, sl_clean, autojunk=False).ratio()
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_line = sl
+                if (
+                    best_line
+                    and best_sim >= 0.70
+                    and best_line.strip().upper() != dh_norm
+                    # The candidate must share at least one distinctive word
+                    # (3+ chars, not boilerplate like "TO", "SOW#", "THE")
+                    and (
+                        set(w for w in dh_norm.split() if len(w) >= 4)
+                        & set(w for w in _clean_md_inline(best_line).upper().split() if len(w) >= 4)
+                    )
+                ):
+                    heading_renames[ds.heading] = best_line
+                    _used_renames.add(_clean_md_inline(best_line).upper())
+
+        del _base_md, _base_result, _mid
+    except Exception as exc:
+        click.echo(f"  Pre-comparison skipped ({exc})")
+
+    if not precompare_used:
+        # Fallback: original AI or deterministic mapping
+        if client is not None:
+            click.echo("Mapping sections (AI)...")
+            mapping = map_sections(client, md_text, docx_sections)
+        else:
+            click.echo("Mapping sections (deterministic)...")
+            mapping = map_sections_deterministic(md_text, docx_sections)
 
     # Force-preserve synthetic boilerplate sections (e.g. signature pages).
     # These are detected dynamically by both parsers and should never be
@@ -2392,6 +2789,8 @@ def run(
 
     # Deterministic unchanged detection: if MD text matches DOCX text after
     # normalization, skip the LLM entirely to preserve original formatting.
+    # (When pre-comparison is used, most sections are already "unchanged" —
+    # this pass catches any remaining edge cases and is harmless to run twice.)
     det_unchanged = 0
     for m in mapping:
         if m.action == "replace" and _sections_text_match(m):
@@ -2480,8 +2879,11 @@ def run(
             f"applying targeted patches only."
         )
 
-    if not edits and client is not None:
-        # AI mode produced no edits — check for single-preamble fallback or copy as-is.
+    if not edits and client is not None and not precompare_used:
+        # AI mode produced no edits AND pre-comparison was not used — check for
+        # single-preamble fallback or copy as-is.  When pre-comparison drives
+        # the pipeline, 0 LLM edits is expected (minor changes handled by
+        # deterministic patches) — do NOT bail out.
         md_len = len(_normalize_text(md_text))
         docx_text_len = sum(
             len(_normalize_text(_extract_docx_section_text(s.xml_fragment)))
@@ -2728,6 +3130,35 @@ def run(
             )
             click.echo(f"  Removed {_dedup_count} duplicate paragraph(s)")
 
+    # 7a-rename. Apply heading renames detected by pre-comparison.
+    # Updates w:t text in heading paragraphs from old to new heading text.
+    if heading_renames:
+        _root = etree.fromstring(modified_xml)
+        _body = _root.find(f"{{{_W}}}body")
+        _renames_applied = 0
+        if _body is not None:
+            for _child in _body:
+                if _child.tag != f"{{{_W}}}p":
+                    continue
+                _htxt = _para_heading_text(_child)
+                if _htxt is None or _htxt not in heading_renames:
+                    continue
+                _new_heading = heading_renames[_htxt]
+                # Replace text in all w:t elements of this paragraph
+                _t_elems = _child.findall(f".//{{{_W}}}t")
+                if len(_t_elems) == 1:
+                    _t_elems[0].text = _new_heading
+                elif _t_elems:
+                    _t_elems[0].text = _new_heading
+                    for _te in _t_elems[1:]:
+                        _te.text = ""
+                _renames_applied += 1
+        if _renames_applied:
+            modified_xml = etree.tostring(
+                _root, xml_declaration=True, encoding="UTF-8", standalone=True
+            )
+            click.echo(f"  Renamed {_renames_applied} heading(s)")
+
     # 7b. Post-LLM bullet style injection
     modified_xml, bullets_styled = _inject_bullet_styles(modified_xml, mapping, docx_path=target)
     if bullets_styled:
@@ -2735,8 +3166,8 @@ def run(
 
     # 7c. Options B, C, D: patch unchanged sections (bullets, text corrections, table rows)
     click.echo("Patching unchanged sections...")
-    modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed = _apply_patches(modified_xml, mapping, full_md=md_text)
-    if bullets_added or corrections_made or rows_updated or rows_inserted or rows_removed:
+    modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed, bullets_removed, bold_applied = _apply_patches(modified_xml, mapping, full_md=md_text)
+    if bullets_added or bullets_removed or corrections_made or bold_applied or rows_updated or rows_inserted or rows_removed:
         parts = [
             f"{bullets_added} bullet(s) added",
             f"{corrections_made} text correction(s)",
@@ -2745,6 +3176,10 @@ def run(
         ]
         if rows_removed:
             parts.append(f"{rows_removed} stale table row(s) removed")
+        if bullets_removed:
+            parts.append(f"{bullets_removed} stale bullet(s) removed")
+        if bold_applied:
+            parts.append(f"{bold_applied} bold span(s) applied")
         click.echo(f"  Patches: {', '.join(parts)}")
 
     # 7d. Post-patch bullet-order enforcement: reorder list paragraphs to
