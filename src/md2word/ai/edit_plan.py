@@ -111,7 +111,24 @@ OOXML rules:
 - CONTENT COMPLETENESS: Include ALL paragraphs and list items from md_content in your output.
   Do not skip or omit any text. Numbered list items in md_content must each become a separate
   paragraph in the output XML (do not merge them).
+- CONTENT ORDER: Preserve the exact order of paragraphs, bullets, list items, and table rows
+  as they appear in md_content. Do not reorder, group, or rearrange any content.
 - Preserve ALL whitespace in text runs using xml:space="preserve": <w:t xml:space="preserve"> </w:t>
+- BOLD SCOPE — CRITICAL: Only apply <w:b/> to text that is wrapped in **double asterisks** in
+  md_content. Text outside the ** markers must NOT be bold. Pay close attention to where the
+  closing ** falls — if md_content has "**Milestone 1: Name** — description", only
+  "Milestone 1: Name" gets <w:b/>, and " — description" is a separate non-bold run.
+  Example: md_content "**Label:** rest of text" →
+    <w:r><w:rPr><w:b/></w:rPr><w:t>Label:</w:t></w:r><w:r><w:t xml:space="preserve"> rest of text</w:t></w:r>
+  This applies everywhere: table cells, bullet items, and body paragraphs.
+- HEADING DEDUPLICATION — CRITICAL: Do NOT include the section heading as the first paragraph
+  in xml_content. The pipeline inserts the heading paragraph automatically. Start xml_content
+  with the first BODY paragraph (the content after the heading). If you include the heading,
+  it will appear twice in the output.
+- SOURCE CONTENT PRIORITY: When md_content and existing_section_summary contain different values
+  for the same field (e.g. a date, name, or number), ALWAYS use the value from md_content.
+  md_content is the authoritative source. existing_section_summary describes the OLD content
+  that is being replaced — do not copy stale values from it.
 - CRITICAL: xml_content must be a SINGLE-LINE string. Do NOT include literal newlines or
   carriage returns inside xml_content. Write compact XML — all elements on one line.
   Use \\n escape sequences if you must represent newlines, but prefer compact XML.

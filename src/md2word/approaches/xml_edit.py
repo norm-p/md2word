@@ -15,6 +15,7 @@ Steps:
 from __future__ import annotations
 
 import copy
+import os
 import re
 import shutil
 import sys
@@ -425,6 +426,44 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
                     ps = ppr.find(f"{{{_W}}}pStyle")
                     if ps is not None:
                         ppr.remove(ps)
+            # Fix B2: Remove LLM body paragraphs whose text matches the section
+            # heading.  The LLM sometimes emits the heading as a plain paragraph
+            # (without heading style) which Fix B cannot catch.  Only check the
+            # first 2 body paragraphs — duplicate headings from the LLM always
+            # appear near the top.  Checking deeper risks removing legitimate
+            # content that happens to match the heading text.
+            if original_heading_para is not None:
+                orig_heading_text = _normalize_text(
+                    "".join(
+                        (t.text or "")
+                        for t in original_heading_para.findall(f".//{{{_W}}}t")
+                    )
+                )
+                if orig_heading_text:
+                    to_remove = []
+                    first = True
+                    body_para_count = 0
+                    for elem in new_elements:
+                        if elem.tag != f"{{{_W}}}p":
+                            continue
+                        if first:
+                            first = False
+                            continue  # skip the heading itself
+                        body_para_count += 1
+                        if body_para_count > 2:
+                            break  # only check first 2 body paragraphs
+                        para_text = _normalize_text(
+                            "".join(
+                                (t.text or "")
+                                for t in elem.findall(f".//{{{_W}}}t")
+                            )
+                        )
+                        if para_text and para_text == orig_heading_text:
+                            to_remove.append(elem)
+                    for elem in to_remove:
+                        body.remove(elem)
+                        new_elements.remove(elem)
+                        tail_pos -= 1
             # Preserve images: if original had drawings and new content has none, re-append them
             if old_drawing_paras and not any(
                 e.find(f".//{{{_W}}}drawing") is not None for e in new_elements
@@ -568,9 +607,16 @@ def _clean_md_inline(text: str) -> str:
     return _MD_INLINE_RE.sub("", text).strip()
 
 
-def _clean_md_table_cell(text: str) -> str:
-    """Clean markdown table cell: unescape backslashes, strip emphasis but keep underscores."""
+def _clean_md_table_cell(text: str, *, keep_bold: bool = False) -> str:
+    """Clean markdown table cell: unescape backslashes, strip emphasis but keep underscores.
+
+    If *keep_bold* is True, ``**`` markers are preserved so that downstream
+    code can create bold/plain run boundaries.
+    """
     val = re.sub(r"\\([_*\\`~|])", r"\1", text)
+    if keep_bold:
+        # Strip everything except ** bold markers
+        return re.sub(r"`{1,3}|~~", "", val).strip()
     return _MD_TABLE_CELL_RE.sub("", val).strip()
 
 
@@ -844,11 +890,16 @@ def _iter_section_paragraphs(section_elements: list[etree._Element]):
                 yield cell_p
 
 
-def _parse_md_table_blocks(md_content: str) -> list[list[list[str]]]:
+def _parse_md_table_blocks(
+    md_content: str, *, keep_bold: bool = False
+) -> list[list[list[str]]]:
     """Parse markdown content into separate table blocks.
 
     Each block is a list of rows (each row a list of cell values).
     Tables are separated by non-table lines (paragraphs, headings, blank lines).
+
+    If *keep_bold* is True, ``**`` markers are preserved in cell values so
+    that downstream code can create bold/plain run boundaries.
     """
     blocks: list[list[list[str]]] = []
     current_block: list[list[str]] = []
@@ -864,7 +915,10 @@ def _parse_md_table_blocks(md_content: str) -> list[list[list[str]]]:
                 raw_cells = raw_cells[1:]
             if raw_cells and not raw_cells[-1].strip():
                 raw_cells = raw_cells[:-1]
-            cells = [_clean_md_table_cell(c.strip()) for c in raw_cells]
+            cells = [
+                _clean_md_table_cell(c.strip(), keep_bold=keep_bold)
+                for c in raw_cells
+            ]
             if not cells:
                 continue
             # Skip separator rows (all dashes/colons)
@@ -891,10 +945,35 @@ def _extract_tr_cells(tr: etree._Element) -> list[str]:
     return cells
 
 
+def _parse_bold_segments(text: str) -> list[tuple[str, bool]]:
+    """Parse markdown bold markers and return [(text, is_bold), ...].
+
+    Handles **bold** markers.  Returns plain text if no markers found.
+    """
+    segments: list[tuple[str, bool]] = []
+    pos = 0
+    while pos < len(text):
+        start = text.find("**", pos)
+        if start == -1:
+            segments.append((text[pos:], False))
+            break
+        if start > pos:
+            segments.append((text[pos:start], False))
+        end = text.find("**", start + 2)
+        if end == -1:
+            # Unclosed marker — treat rest as plain
+            segments.append((text[start:], False))
+            break
+        segments.append((text[start + 2:end], True))
+        pos = end + 2
+    return [(t, b) for t, b in segments if t]
+
+
 def _set_tr_cell_texts(tr: etree._Element, md_cells: list[str]) -> int:
     """Update cell text values in a w:tr from MD cell values.
 
     For each w:tc, finds the first w:p with a w:r and updates its w:t.
+    Preserves bold run boundaries when MD cells contain **bold** markers.
     Returns the number of cells changed.
     """
     tcs = tr.findall(f"{{{_W}}}tc")
@@ -903,11 +982,12 @@ def _set_tr_cell_texts(tr: etree._Element, md_cells: list[str]) -> int:
         if i >= len(md_cells):
             break
         md_val = md_cells[i]
-        # Get current cell text
+        # Get current cell text (strip markdown bold for comparison)
         current = " ".join(
             (t.text or "") for t in tc.findall(f".//{{{_W}}}t")
         ).strip()
-        if current == md_val:
+        plain_md = md_val.replace("**", "")
+        if current == plain_md:
             continue
         # Find the first paragraph with a run to update
         all_paras = tc.findall(f"{{{_W}}}p")
@@ -916,21 +996,65 @@ def _set_tr_cell_texts(tr: etree._Element, md_cells: list[str]) -> int:
             runs = p.findall(f"{{{_W}}}r")
             if not runs:
                 continue
-            # Set text on first run's first w:t
-            t_elems = runs[0].findall(f"{{{_W}}}t")
-            if t_elems:
-                t_elems[0].text = md_val
-                t_elems[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                # Remove extra w:t elements
-                for extra_t in t_elems[1:]:
-                    runs[0].remove(extra_t)
+
+            # Parse bold segments from MD content
+            segments = _parse_bold_segments(md_val)
+            has_bold_markers = any(b for _, b in segments)
+
+            if has_bold_markers and len(segments) > 1:
+                # Build new runs matching bold boundaries.
+                # Preserve pPr (paragraph properties) from the original paragraph.
+                # Use first run as template for run properties.
+                template_rpr = runs[0].find(f"{{{_W}}}rPr")
+
+                # Remove all existing runs
+                for r in runs:
+                    p.remove(r)
+
+                for seg_text, seg_bold in segments:
+                    new_run = etree.SubElement(p, f"{{{_W}}}r")
+                    # Clone base run properties (font, size, etc.) from template
+                    if template_rpr is not None:
+                        new_rpr = copy.deepcopy(template_rpr)
+                    else:
+                        new_rpr = etree.SubElement(new_run, f"{{{_W}}}rPr")
+                    # Set or remove bold
+                    b_elem = new_rpr.find(f"{{{_W}}}b")
+                    bcs_elem = new_rpr.find(f"{{{_W}}}bCs")
+                    if seg_bold:
+                        if b_elem is None:
+                            etree.SubElement(new_rpr, f"{{{_W}}}b")
+                        if bcs_elem is None:
+                            etree.SubElement(new_rpr, f"{{{_W}}}bCs")
+                    else:
+                        if b_elem is not None:
+                            new_rpr.remove(b_elem)
+                        if bcs_elem is not None:
+                            new_rpr.remove(bcs_elem)
+                    # Only add rPr if it was created from template or has children
+                    if template_rpr is not None:
+                        new_run.insert(0, new_rpr)
+                    elif len(new_rpr) > 0:
+                        new_run.insert(0, new_rpr)
+                    t_elem = etree.SubElement(new_run, f"{{{_W}}}t")
+                    t_elem.text = seg_text
+                    t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
             else:
-                t_elem = etree.SubElement(runs[0], f"{{{_W}}}t")
-                t_elem.text = md_val
-                t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-            # Remove extra runs to avoid duplicate text
-            for extra_r in runs[1:]:
-                p.remove(extra_r)
+                # No bold markers — original single-run behavior
+                plain_text = plain_md
+                t_elems = runs[0].findall(f"{{{_W}}}t")
+                if t_elems:
+                    t_elems[0].text = plain_text
+                    t_elems[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                    for extra_t in t_elems[1:]:
+                        runs[0].remove(extra_t)
+                else:
+                    t_elem = etree.SubElement(runs[0], f"{{{_W}}}t")
+                    t_elem.text = plain_text
+                    t_elem.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                # Remove extra runs to avoid duplicate text
+                for extra_r in runs[1:]:
+                    p.remove(extra_r)
             updated = True
             break
         # Remove extra paragraphs in the cell to prevent duplication
@@ -963,6 +1087,7 @@ def _patch_table_rows(
     from difflib import SequenceMatcher
 
     md_blocks = _parse_md_table_blocks(md_content)
+    md_blocks_raw = _parse_md_table_blocks(md_content, keep_bold=True)
     if not md_blocks:
         return 0, 0, 0
 
@@ -978,7 +1103,10 @@ def _patch_table_rows(
     # Phase 0: Match each DOCX table to the best MD table block.
     # This prevents cross-table contamination when a section has many sub-tables.
     md_block_used: set[int] = set()
-    table_block_pairs: list[tuple[etree._Element, list[list[str]]]] = []
+    # Each entry: (tbl, cleaned_rows, raw_rows_with_bold_markers)
+    table_block_pairs: list[
+        tuple[etree._Element, list[list[str]], list[list[str]]]
+    ] = []
 
     for tbl in docx_tables:
         docx_trs = tbl.findall(f"{{{_W}}}tr")
@@ -1023,10 +1151,12 @@ def _patch_table_rows(
             if len(col_counts) > 1:
                 continue
             md_block_used.add(best_bi)
-            table_block_pairs.append((tbl, md_blocks[best_bi]))
+            table_block_pairs.append(
+                (tbl, md_blocks[best_bi], md_blocks_raw[best_bi])
+            )
 
     # Phase 1-3: For each matched table-block pair, do row-level matching
-    for tbl, md_table_rows in table_block_pairs:
+    for tbl, md_table_rows, md_table_rows_raw in table_block_pairs:
         docx_trs = tbl.findall(f"{{{_W}}}tr")
         if not docx_trs:
             continue
@@ -1080,7 +1210,9 @@ def _patch_table_rows(
                     break
             if not needs_update:
                 continue
-            changed = _set_tr_cell_texts(tr, md_row)
+            # Pass raw cells (with **bold** markers) so _set_tr_cell_texts
+            # can create proper bold/plain run boundaries.
+            changed = _set_tr_cell_texts(tr, md_table_rows_raw[mi])
             if changed:
                 total_updated += 1
 
@@ -1120,7 +1252,8 @@ def _patch_table_rows(
                         new_tr.append(new_tc)
                         tcs = new_tr.findall(f"{{{_W}}}tc")
 
-                    _set_tr_cell_texts(new_tr, md_row)
+                    # Pass raw cells (with **bold** markers) for proper formatting
+                    _set_tr_cell_texts(new_tr, md_table_rows_raw[mi])
 
                     # Find insertion position: after the nearest preceding matched DOCX row
                     anchor_di = None
@@ -1488,6 +1621,12 @@ def _patch_text_corrections(
             continue
         if _para_heading_text(elem) is not None:
             continue
+        # Skip paragraphs containing structured document tags (w:sdt) —
+        # these are content controls whose text is not in normal w:r runs.
+        # Correcting run text without accounting for SDT content causes
+        # duplication (the SDT retains its text and the run gets a copy).
+        if elem.find(f".//{{{_W}}}sdt") is not None:
+            continue
         is_list = _is_list_para(elem)
         pool = md_bullet_lines if is_list else md_lines
         if not pool:
@@ -1702,14 +1841,30 @@ def _repackage_docx(source: Path, output_path: Path, modified_xml: bytes) -> Non
 
     Uses ZipInfo entries directly to preserve per-file metadata (timestamps,
     compression method, entry ordering).
+
+    When source == output_path (--overwrite mode), writes to a temporary file
+    first then replaces the original atomically.
     """
+    import tempfile
+
+    same_file = source.resolve() == output_path.resolve()
+    if same_file:
+        fd, tmp_path_str = tempfile.mkstemp(suffix=".docx", dir=output_path.parent)
+        os.close(fd)
+        dest_path = Path(tmp_path_str)
+    else:
+        dest_path = output_path
+
     with zipfile.ZipFile(source, "r") as src_zf:
-        with zipfile.ZipFile(output_path, "w") as dst_zf:
+        with zipfile.ZipFile(dest_path, "w") as dst_zf:
             for item in src_zf.infolist():
                 if item.filename == "word/document.xml":
                     dst_zf.writestr(item, modified_xml)
                 else:
                     dst_zf.writestr(item, src_zf.read(item.filename))
+
+    if same_file:
+        dest_path.replace(output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -2169,7 +2324,8 @@ def run(
                 return
             else:
                 click.echo("No edits needed — copying base as-is.")
-                shutil.copy2(target, output_path)
+                if target.resolve() != output_path.resolve():
+                    shutil.copy2(target, output_path)
                 return
 
         # Force all matched sections to "unchanged" so the patch step (7c)
@@ -2210,7 +2366,8 @@ def run(
             return
 
         click.echo("No edits needed — copying base as-is.")
-        shutil.copy2(target, output_path)
+        if target.resolve() != output_path.resolve():
+            shutil.copy2(target, output_path)
         return
 
     if edits:

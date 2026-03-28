@@ -64,7 +64,8 @@ local/
 *_draft.md
 
 # Bundled binaries (too large for git; see README for install instructions)
-tools/
+tools/*
+!tools/validate_html.py
 
 # Other
 .archive/
@@ -77,4 +78,5 @@ skills/
 OUTPUT-REVIEW-*.md
 ITERATION-PROCESS.md
 !tools/*.docx
+*.docx
 tools/pandoc.exe

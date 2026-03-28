@@ -102,6 +102,8 @@ def _detect_approach(mode: str, output: Path) -> str:
               help="Inject TOC placeholder (create mode, pandoc only).")
 @click.option("--accept-changes", is_flag=True, default=False,
               help="Skip change summary and confirmation (update mode).")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="Overwrite the base DOCX in place instead of creating a versioned copy (update mode).")
 @click.option("-v", "--verbose", is_flag=True, default=False,
               help="Show step-by-step progress including AI reasoning.")
 def main(
@@ -112,6 +114,7 @@ def main(
     ref_doc: Path | None,
     toc: bool,
     accept_changes: bool,
+    overwrite: bool,
     verbose: bool,
 ) -> None:
     """Convert a Markdown file to a Word document.
@@ -136,9 +139,17 @@ def main(
         click.echo(f"Mode: {result.mode} — {result.rationale}")
 
     # 2. Resolve output path
+    if overwrite and output is not None:
+        raise click.UsageError("--overwrite and -o/--output are mutually exclusive.")
+    if overwrite and base is None:
+        raise click.UsageError("--overwrite requires a base document (update mode).")
+
     if output is None:
         if base is not None:
-            output = _next_versioned_path(base)
+            if overwrite:
+                output = base
+            else:
+                output = _next_versioned_path(base)
         else:
             output = input_md.with_suffix(".docx")
 

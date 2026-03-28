@@ -15,7 +15,7 @@
 
 ## Build and Test
 - Install dependencies: `uv sync`
-- Run CLI: `uv run md2word INPUT.md [BASE.docx] [-o OUT.docx] [--ref-doc template.docx] [--toc] [-v]`
+- Run CLI: `uv run md2word INPUT.md [BASE.docx] [-o OUT.docx] [--ref-doc template.docx] [--toc] [--overwrite] [-v]`
 - Run tests: `uv run pytest`
 - Configure `.env` from `.env.example` for AI provider credentials (optional).
 - `PYPANDOC_PANDOC` points to the pandoc binary if not on `PATH` (e.g., `tools/pandoc.exe`).

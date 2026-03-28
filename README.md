@@ -54,6 +54,7 @@ uv run md2word revised.md original.docx
 uv run md2word revised.md original.docx -o updated.docx
 uv run md2word -i revised.md -b original.docx -o updated.docx
 uv run md2word revised.md original.docx --accept-changes
+uv run md2word revised.md original.docx --overwrite
 uv run md2word document.md original.docx -v
 ```
 
@@ -67,6 +68,7 @@ uv run md2word document.md original.docx -v
 | `--ref-doc PATH` | Reference `.docx` for pandoc styling (create mode only) |
 | `--toc` | Inject table of contents placeholder (create mode only) |
 | `--accept-changes` | Skip change summary and confirmation (update mode) |
+| `--overwrite` | Overwrite the base `.docx` in place instead of creating a versioned copy (update mode) |
 | `-v, --verbose` | Show step-by-step progress |
 
 ### Output versioning
@@ -78,7 +80,7 @@ report.docx      ->  report_v001.docx
 report_v001.docx ->  report_v002.docx
 ```
 
-Existing files are never overwritten.
+Existing files are never overwritten unless `--overwrite` is used, which writes back to the base file directly.
 
 ## How update mode works
 
@@ -178,4 +180,6 @@ Contributions are welcome. The codebase follows a clear separation: AI logic liv
 
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for full terms.
+
+Free for personal and commercial use. The only requirement is that the original copyright notice and permission notice be included in all copies or substantial portions of the software. This applies to source distributions, forks, and any product that incorporates md2word code — attribution must be preserved.
