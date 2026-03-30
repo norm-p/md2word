@@ -18,6 +18,7 @@ from typing import Literal
 
 import click
 
+from .. import output as out
 from .chunk import DocxSection
 from .client import LLMClient, parse_llm_json
 
@@ -319,10 +320,10 @@ def _resplit_large_sections(
             new_results.append(mapping)
             continue
 
-        click.echo(
-            f"  Re-splitting '{mapping.md_heading}': "
+        out.detail(
+            f"Re-splitting '{mapping.md_heading}': "
             f"found {len(split_points)} embedded DOCX heading(s) → "
-            f"{len(split_points) + 1} synthetic sections."
+            f"{len(split_points) + 1} synthetic sections"
         )
 
         # Intro: text before the first split point — keep under the original mapping
@@ -430,7 +431,7 @@ def map_sections(
         total = (len(md_pairs) + _MAP_BATCH_SIZE - 1) // _MAP_BATCH_SIZE
         for i in range(total):
             batch = md_pairs[i * _MAP_BATCH_SIZE:(i + 1) * _MAP_BATCH_SIZE]
-            click.echo(f"  Mapping sections: batch {i + 1}/{total}")
+            out.detail(f"Mapping sections: batch {i + 1}/{total}")
             mappings_data.extend(_call_map_batch(client, batch, docx_list))
 
     results: list[SectionMapping] = []

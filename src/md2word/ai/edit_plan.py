@@ -19,6 +19,7 @@ from typing import Literal
 import click
 from lxml import etree
 
+from .. import output as out
 from .client import LLMClient, parse_llm_json
 from .map import SectionMapping
 
@@ -332,9 +333,9 @@ def _process_batch(
         except (json.JSONDecodeError, Exception) as exc2:
             # Unrecoverable — preserve all sections in this batch
             headings = [m.md_heading for m in batch]
-            click.echo(
-                f"  Warning: edit plan batch failed after retry ({exc2}). "
-                f"Preserving original content for: {', '.join(repr(h) for h in headings[:3])}"
+            out.warn(
+                f"Edit plan batch failed after retry ({exc2}) — "
+                f"preserving original content for: {', '.join(repr(h) for h in headings[:3])}"
                 + (f" (+{len(headings)-3} more)" if len(headings) > 3 else "")
             )
             return []
@@ -357,12 +358,12 @@ def _process_batch(
             try:
                 _validate_fragment(xml_content)
             except etree.XMLSyntaxError as e:
-                click.echo(f"  Warning: invalid XML for '{target}', retrying...")
+                out.warn(f"Invalid XML for '{target}', retrying")
                 original_entry = entries_by_target.get(target)
                 if original_entry:
                     xml_content = _repair_fragment(client, original_entry, xml_content, str(e))
                     if xml_content is None:
-                        click.echo(f"  Warning: retry failed for '{target}', preserving original.")
+                        out.warn(f"Retry failed for '{target}', preserving original")
                         continue
                 else:
                     continue
@@ -374,9 +375,9 @@ def _process_batch(
                 md_bullets = len(_BULLET_RE.findall(entry["md_content"]))
                 xml_bullets = xml_content.count("ListBullet")
                 if md_bullets > 0 and xml_bullets < md_bullets * 0.5:
-                    click.echo(
-                        f"  Warning: bullet loss in '{target}': "
-                        f"{xml_bullets} ListBullet paragraph(s) for {md_bullets} MD bullet(s)."
+                    out.warn(
+                        f"Bullet loss in '{target}': "
+                        f"{xml_bullets} ListBullet paragraph(s) for {md_bullets} MD bullet(s)"
                     )
 
         result.append(Edit(kind=kind, target_heading=target, content=xml_content or ""))
@@ -446,12 +447,12 @@ def build_edit_plan(
     # Multiple batches — process in parallel
     import concurrent.futures
 
-    click.echo(f"  Processing {len(batches)} batches (up to {MAX_PARALLEL_BATCHES} in parallel)...")
+    out.detail(f"Processing {len(batches)} batches (up to {MAX_PARALLEL_BATCHES} in parallel)")
 
     def _run_batch(batch_idx: int, batch: list[SectionMapping]) -> tuple[int, list[Edit]]:
         is_large = len(batch) == 1 and len(batch[0].md_content) > MAX_SECTION_CHARS
         large = " (large)" if is_large else ""
-        click.echo(f"  Edit plan: batch {batch_idx + 1}/{len(batches)}{large}")
+        out.detail(f"Edit plan: batch {batch_idx + 1}/{len(batches)}{large}")
         edits = _process_batch(
             client, batch,
             doc_heading_styles=doc_heading_styles,

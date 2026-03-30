@@ -32,6 +32,7 @@ from ..ai.conflict import detect_conflicts
 from ..ai.edit_plan import Edit, build_edit_plan
 from ..ai.map import SectionMapping, map_sections, map_sections_deterministic
 from ..ai.summarize import summarize_changes
+from .. import output as out
 
 _W = NS["w"]
 _R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -49,6 +50,9 @@ _MD_TABLE_CELL_RE = re.compile(r"\*{1,2}|`{1,3}|~~")  # like _MD_INLINE_RE but k
 # Module-level heading map — populated from styles.xml at run() startup.
 # Used by _para_heading_text to support custom heading styles.
 _heading_map: dict[str, int] | None = None
+
+# Module-level verbose flag — set by run() so helper functions can use out.verbose().
+_verbose: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -491,8 +495,8 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
                 body.remove(elem)
                 new_elements.remove(elem)
                 tail_pos -= 1
-                click.echo(
-                    f"  Removed consecutive duplicate paragraph in "
+                out.detail(
+                    f"Removed consecutive duplicate paragraph in "
                     f"'{edit.target_heading}'"
                 )
             # Preserve images: if original had drawings and new content has none, re-append them
@@ -512,9 +516,9 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
             # section had no tables — the LLM hallucinated them from the
             # structural summary or surrounding context.
             if not old_tables and new_tables:
-                click.echo(
-                    f"  Removing {len(new_tables)} spurious LLM-generated table(s) in "
-                    f"'{edit.target_heading}' — original section had none."
+                out.detail(
+                    f"Removing {len(new_tables)} spurious LLM-generated table(s) in "
+                    f"'{edit.target_heading}' — original section had none"
                 )
                 for bad_tbl in new_tables:
                     body.remove(bad_tbl)
@@ -529,9 +533,9 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
             ):
                 rescue_tables = True
             if rescue_tables:
-                click.echo(
-                    f"  Preserving {len(old_tables)} original table(s) in "
-                    f"'{edit.target_heading}' — LLM output had none/insufficient rows."
+                out.detail(
+                    f"Preserving {len(old_tables)} original table(s) in "
+                    f"'{edit.target_heading}' — LLM output had none/insufficient rows"
                 )
                 for bad_tbl in new_tables:
                     body.remove(bad_tbl)
@@ -566,13 +570,13 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
             _, end = _find_section_range(body, edit.target_heading)
             for j, elem in enumerate(new_elements):
                 body.insert(end + j, elem)
-            click.echo(
-                f"  Deferred insert for '{edit.target_heading}' succeeded on retry."
+            out.detail(
+                f"Deferred insert for '{edit.target_heading}' succeeded on retry"
             )
         except ValueError:
-            click.echo(
-                f"  Warning: insert anchor '{edit.target_heading}' not found "
-                "— SKIPPING insert (content not placed)."
+            out.warn(
+                f"Insert anchor '{edit.target_heading}' not found "
+                "— SKIPPING insert (content not placed)"
             )
 
     # Final cleanup: remove heading-styled paragraphs with no visible text.
@@ -593,9 +597,7 @@ def _apply_edits(document_xml: str, edits: list[Edit]) -> bytes:
         body.remove(child)
         empty_heading_count += 1
     if empty_heading_count:
-        click.echo(
-            f"  Removed {empty_heading_count} empty heading paragraph(s)"
-        )
+        out.detail(f"Removed {empty_heading_count} empty heading paragraph(s)")
 
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
@@ -634,9 +636,9 @@ def _check_media_refs(edits: list[Edit], valid_ids: set[str]) -> None:
                 for attr in [f"{{{_R}}}id", f"{{{_R}}}embed", f"{{{_R}}}link"]:
                     val = elem.get(attr)
                     if val and val not in valid_ids:
-                        click.echo(
-                            f"  Warning: section '{edit.target_heading}' references "
-                            f"unknown relationship ID '{val}' — may produce broken link in output."
+                        out.warn(
+                            f"Section '{edit.target_heading}' references "
+                            f"unknown relationship ID '{val}' — may produce broken link in output"
                         )
         except Exception:
             pass
@@ -1332,8 +1334,8 @@ def _patch_table_rows(
             # Safety guard: don't insert if unmatched count is disproportionately large.
             docx_row_count = len(docx_trs)
             if len(unmatched_md) > max(docx_row_count, 5):
-                click.echo(
-                    f"    Skipping {len(unmatched_md)} row insertion(s) — "
+                out.warn(
+                    f"Skipping {len(unmatched_md)} row insertion(s) — "
                     f"exceeds DOCX table size ({docx_row_count} rows)"
                 )
                 skip_insert = True
@@ -2114,7 +2116,7 @@ def _apply_patches(
                 parts.append(f"{rows_inserted} row(s) inserted")
             if rows_removed:
                 parts.append(f"{rows_removed} stale row(s) removed")
-            click.echo(f"  Table patch in '{heading_text}': {', '.join(parts)}")
+            out.detail(f"Table patch in '{heading_text}': {', '.join(parts)}")
             # Refresh after table modifications
             start_idx, end_idx = _find_section_range(body, heading_text)
             section_elements = list(body)[start_idx:end_idx]
@@ -2122,18 +2124,18 @@ def _apply_patches(
         corrections = _patch_text_corrections(section_elements, mapping.md_content)
         if corrections:
             total_corrections += corrections
-            click.echo(f"  Corrected {corrections} paragraph(s) in '{heading_text}'")
+            out.detail(f"Corrected {corrections} paragraph(s) in '{heading_text}'")
 
         # Option C+bold: apply **bold** emphasis from source MD
         bold_applied = _patch_bold_emphasis(section_elements, mapping.md_content)
         if bold_applied:
             total_bold_applied += bold_applied
-            click.echo(f"  Applied bold to {bold_applied} span(s) in '{heading_text}'")
+            out.detail(f"Applied bold to {bold_applied} span(s) in '{heading_text}'")
 
         bullets = _patch_new_bullets(body, section_elements, end_idx, mapping.md_content)
         if bullets:
             total_bullets += bullets
-            click.echo(f"  Inserted {bullets} new bullet(s) in '{heading_text}'")
+            out.detail(f"Inserted {bullets} new bullet(s) in '{heading_text}'")
 
         # Option E: remove DOCX bullets not present in source MD.
         # Refresh section_elements after Option B insertions.
@@ -2146,7 +2148,7 @@ def _apply_patches(
             removed = _remove_stale_bullets(body, section_elements, mapping.md_content)
             if removed:
                 total_bullets_removed += removed
-                click.echo(f"  Removed {removed} stale bullet(s) in '{heading_text}'")
+                out.detail(f"Removed {removed} stale bullet(s) in '{heading_text}'")
 
     # Second pass: table + text corrections for LLM-edited sections.
     # Option D patches stale table cell values the LLM carried over from the
@@ -2177,8 +2179,8 @@ def _apply_patches(
                 parts.append(f"{rows_inserted} row(s) inserted")
             if rows_removed:
                 parts.append(f"{rows_removed} stale row(s) removed")
-            click.echo(
-                f"  Post-LLM table patch in '{heading_text}': {', '.join(parts)}"
+            out.detail(
+                f"Post-LLM table patch in '{heading_text}': {', '.join(parts)}"
             )
             # Refresh after table modifications
             start_idx, end_idx = _find_section_range(body, heading_text)
@@ -2189,8 +2191,8 @@ def _apply_patches(
         )
         if corrections:
             total_corrections += corrections
-            click.echo(
-                f"  Post-LLM corrected {corrections} paragraph(s) in '{heading_text}'"
+            out.detail(
+                f"Post-LLM corrected {corrections} paragraph(s) in '{heading_text}'"
             )
 
     # Third pass: Option D on unmatched DOCX sections that contain tables.
@@ -2233,8 +2235,8 @@ def _apply_patches(
             )
             if corrections:
                 total_corrections += corrections
-                click.echo(
-                    f"  Corrected {corrections} paragraph(s) in "
+                out.detail(
+                    f"Corrected {corrections} paragraph(s) in "
                     f"'{heading_text}'"
                 )
             # Option D: table row patching on unmatched sections
@@ -2256,8 +2258,8 @@ def _apply_patches(
                         parts.append(f"{rows_inserted} row(s) inserted")
                     if rows_removed:
                         parts.append(f"{rows_removed} stale row(s) removed")
-                    click.echo(
-                        f"  Unmatched section table patch in "
+                    out.detail(
+                        f"Unmatched section table patch in "
                         f"'{heading_text}': {', '.join(parts)}"
                     )
             i = sec_end
@@ -2461,23 +2463,23 @@ def _validate_round_trip(source_md: str, output_path: Path) -> None:
         result = mid.convert(str(output_path))
         output_md = result.text_content
     except Exception as exc:
-        click.echo(f"  Info: Round-trip validation skipped ({exc})")
+        out.info(f"Round-trip validation skipped ({exc})")
         return
 
     # Save round-trip .md alongside the output .docx for human review
     md_output_path = output_path.with_suffix(".md")
     try:
         md_output_path.write_text(output_md, encoding="utf-8")
-        click.echo(f"  Saved round-trip MD: {md_output_path.name}")
+        out.detail(f"Saved round-trip MD: {md_output_path.name}")
     except Exception as exc:
-        click.echo(f"  Info: Could not save round-trip MD ({exc})")
+        out.info(f"Could not save round-trip MD ({exc})")
 
     from ..ai.map import _parse_md_sections
 
     src_sections = _parse_md_sections(source_md)
     out_sections = _parse_md_sections(output_md)
 
-    click.echo("Validating round-trip output...")
+    out.step("Validating round-trip output")
 
     # --- Level 1: Heading structure ---
     from collections import Counter
@@ -2489,21 +2491,21 @@ def _validate_round_trip(source_md: str, output_path: Path) -> None:
 
     src_breakdown = ", ".join(f"{v} at H{k}" for k, v in sorted(src_levels.items()))
     out_breakdown = ", ".join(f"{v} at H{k}" for k, v in sorted(out_levels.items()))
-    click.echo(f"  Source headings : {src_total} ({src_breakdown})")
-    click.echo(f"  Output headings : {out_total} ({out_breakdown})")
+    out.detail(f"Source headings : {src_total} ({src_breakdown})")
+    out.detail(f"Output headings : {out_total} ({out_breakdown})")
 
     for lvl, src_count in sorted(src_levels.items()):
         out_count = out_levels.get(lvl, 0)
         if out_count < src_count:
             diff = src_count - out_count
-            click.echo(
-                f"  Warning: {diff} expected H{lvl} section(s) may be missing or "
+            out.warn(
+                f"{diff} expected H{lvl} section(s) may be missing or "
                 f"rendered at wrong level in output"
             )
 
     if out_total > src_total * 2 and out_total - src_total > 5:
-        click.echo(
-            f"  Warning: output has {out_total - src_total} more headings than source "
+        out.warn(
+            f"Output has {out_total - src_total} more headings than source "
             f"({out_total} vs {src_total}) — LLM may have over-structured content"
         )
 
@@ -2602,11 +2604,11 @@ def _validate_round_trip(source_md: str, output_path: Path) -> None:
 
     # --- Emit all warnings ---
     if section_warnings:
-        click.echo(f"  Section-level issues ({len(section_warnings)}):")
+        out.detail(f"Section-level issues ({len(section_warnings)}):")
         for w in section_warnings:
-            click.echo(f"    - {w}")
+            out.verbose(f"- {w}", True)
     else:
-        click.echo("  Info: Section-level content comparison looks consistent.")
+        out.info("Section-level content comparison looks consistent")
 
 
 # ---------------------------------------------------------------------------
@@ -2627,12 +2629,10 @@ def _fallback_to_create(
     Returns True if the fallback was executed (caller should return early),
     False if the user declined (caller should continue with update pipeline).
     """
-    click.echo(
-        f"  Documents appear too different for update mode ({match_pct} match)."
-    )
-    click.echo(f"  Reason: {reason}")
+    out.warn(f"Documents appear too different for update mode ({match_pct} match)")
+    out.detail(f"Reason: {reason}")
     if accept_changes:
-        click.echo("  Creating new document with base styling (--accept-changes).")
+        out.detail("Creating new document with base styling (--accept-changes)")
         proceed = True
     else:
         proceed = click.confirm(
@@ -2641,7 +2641,7 @@ def _fallback_to_create(
         )
     if not proceed:
         return False
-    click.echo(f"Converting {input_path.name} → {output_path.name} (create mode with style reference)...")
+    out.step(f"Converting {input_path.name} → {output_path.name} (create mode with style reference)")
     from .pandoc import run as pandoc_run
     pandoc_run(input_path, output_path, ref_doc=target, toc=False, verbose=verbose)
     return True
@@ -2659,19 +2659,23 @@ def run(
     if target is None:
         raise ValueError("xml_edit approach requires a base .docx file")
 
+    global _verbose
+    _verbose = verbose
+    out.init_steps()
+
     client = get_client_or_none()
     if client is None:
-        click.echo("No AI provider configured — running in deterministic-only mode.")
-        click.echo("  (Set AI_PROVIDER, AI_MODEL, and API key in .env for AI-augmented updates.)")
+        out.info("No AI provider configured — running in deterministic-only mode")
+        out.detail("Set AI_PROVIDER, AI_MODEL, and API key in .env for AI-augmented updates")
     md_text = input_path.read_text(encoding="utf-8")
 
     # 1. Check for conflicts (deterministic)
-    click.echo("Scanning for tracked changes...")
+    out.step("Scanning for tracked changes")
     conflicts = detect_conflicts(target)
-    click.echo(f"  {conflicts.summary}")
+    out.detail(conflicts.summary)
 
     # 2. Read and chunk the DOCX
-    click.echo("Chunking base document...")
+    out.step("Chunking base document")
     document_xml = extract_document_xml(target)
 
     # Build heading and list style maps from styles.xml
@@ -2686,18 +2690,18 @@ def run(
 
     # Warn if list styles could not be detected (LLM will fall back to ListBullet/ListNumber)
     if list_style_map.get("bullet") is None:
-        click.echo(
-            "  Info: No ListBullet-style paragraph found in styles.xml — "
-            "using 'ListBullet' as default. Verify this style exists in the document."
+        out.info(
+            "No ListBullet-style paragraph found in styles.xml — "
+            "using 'ListBullet' as default"
         )
     if list_style_map.get("numbered") is None:
-        click.echo(
-            "  Info: No ListNumber-style paragraph found in styles.xml — "
-            "using 'ListNumber' as default. Verify this style exists in the document."
+        out.info(
+            "No ListNumber-style paragraph found in styles.xml — "
+            "using 'ListNumber' as default"
         )
 
     if conflicts.has_tracked_changes:
-        click.echo("  Accepting all tracked changes...")
+        out.detail("Accepting all tracked changes")
         document_xml = _accept_tracked_changes(document_xml)
 
     docx_sections = chunk_docx_xml(document_xml, heading_map=_heading_map)
@@ -2706,11 +2710,11 @@ def run(
     empty_count = sum(1 for s in docx_sections if not s.heading.strip())
     if empty_count:
         docx_sections = [s for s in docx_sections if s.heading.strip()]
-        click.echo(f"  Filtered {empty_count} empty-heading section(s)")
-    click.echo(f"  {len(docx_sections)} sections found")
+        out.detail(f"Filtered {empty_count} empty-heading section(s)")
+    out.detail(f"{len(docx_sections)} sections found")
     if verbose:
         for s in docx_sections:
-            click.echo(f"    [H{s.heading_level}] {s.heading!r}")
+            out.verbose(f"[H{s.heading_level}] '{s.heading}'", True)
 
     # 3. Pre-comparison: convert base DOCX to MD, diff against source MD.
     # This tells us exactly what changed, avoiding unnecessary LLM calls.
@@ -2722,7 +2726,7 @@ def run(
             pre_compare, pre_compare_overall_similarity,
             map_sections_precompare,
         )
-        click.echo("Pre-comparing base document against source...")
+        out.step("Pre-comparing base document against source")
         _mid = _MID()
         _base_result = _mid.convert(str(target))
         _base_md = _base_result.text_content
@@ -2735,8 +2739,8 @@ def run(
         n_major = sum(1 for d in _diffs if d.action == "major_change")
         n_new = sum(1 for d in _diffs if d.action == "new")
         n_renamed = sum(1 for d in _diffs if d.heading_renamed)
-        click.echo(
-            f"  {len(_diffs)} sections: {n_identical} identical, "
+        out.detail(
+            f"{len(_diffs)} sections: {n_identical} identical, "
             f"{n_minor} minor edit, {n_major} major change, {n_new} new"
             + (f", {n_renamed} heading rename(s)" if n_renamed else "")
         )
@@ -2758,11 +2762,11 @@ def run(
             for d in _diffs:
                 if d.heading_renamed and d.base_heading is not None:
                     heading_renames[d.base_heading] = d.source_heading
-            click.echo("Mapping sections (pre-comparison)...")
+            out.step("Mapping sections (pre-comparison)")
             mapping = map_sections_precompare(_diffs, docx_sections)
         else:
-            click.echo(
-                f"  Pre-comparison unreliable ({_reliability:.0%} match) "
+            out.info(
+                f"Pre-comparison unreliable ({_reliability:.0%} match) "
                 f"— falling back to {'AI' if client else 'deterministic'} mapping"
             )
         # Detect heading renames for non-MD headings: DOCX headings that
@@ -2814,15 +2818,15 @@ def run(
 
         del _base_md, _base_result, _mid
     except Exception as exc:
-        click.echo(f"  Pre-comparison skipped ({exc})")
+        out.info(f"Pre-comparison skipped ({exc})")
 
     if not precompare_used:
         # Fallback: original AI or deterministic mapping
         if client is not None:
-            click.echo("Mapping sections (AI)...")
+            out.step("Mapping sections (AI)")
             mapping = map_sections(client, md_text, docx_sections)
         else:
-            click.echo("Mapping sections (deterministic)...")
+            out.step("Mapping sections (deterministic)")
             mapping = map_sections_deterministic(md_text, docx_sections)
 
     # Force-preserve synthetic boilerplate sections (e.g. signature pages).
@@ -2842,17 +2846,18 @@ def run(
             m.action = "unchanged"
             det_unchanged += 1
     if det_unchanged:
-        click.echo(f"  {det_unchanged} section(s) unchanged (text match) — preserving formatting")
+        out.detail(f"{det_unchanged} section(s) unchanged (text match) — preserving formatting")
 
     n_changes = sum(1 for m in mapping if m.action != "unchanged")
-    click.echo(f"  {len(mapping)} MD sections mapped, {n_changes} require edits")
+    out.detail(f"{len(mapping)} MD sections mapped, {n_changes} require edits")
     if verbose:
         for m in mapping:
             md_h = m.md_heading.encode("ascii", "replace").decode()
             docx_h = m.docx_section.heading.encode("ascii", "replace").decode() if m.docx_section else ""
-            click.echo(
-                f"  '{md_h}' -> {m.action}"
-                + (f" ('{docx_h}')" if m.docx_section else "")
+            out.verbose(
+                f"'{md_h}' -> {m.action}"
+                + (f" ('{docx_h}')" if m.docx_section else ""),
+                True,
             )
 
     # Secondary divergence check (post-mapping): catch cases where
@@ -2891,7 +2896,8 @@ def run(
     # 4. Build edit plan (AI, batched) — skip in deterministic-only mode
     edits: list[Edit] = []
     if client is not None:
-        click.echo(f"Building edit plan ({n_changes} section(s) to update)...")
+        ai_tag = " (AI)" if n_changes > 0 else ", skipped"
+        out.step(f"Building edit plan — {n_changes} section(s){ai_tag}")
         # Primary: styles actually used in document (frequency-based; most reliable).
         # Fallback: add styles from the full heading map for levels not yet in use — so
         # inserted sections at a level not yet present can still get a proper style.
@@ -2914,7 +2920,7 @@ def run(
         )
         if verbose:
             for e in edits:
-                click.echo(f"  {e.kind}: {e.target_heading!r}")
+                out.verbose(f"{e.kind}: '{e.target_heading}'", True)
     else:
         # Deterministic mode: check for single-preamble fallback first.
         is_single_preamble = (
@@ -2930,9 +2936,9 @@ def run(
             )
             is_substantially_different = md_len > docx_text_len * 1.5 or md_len > docx_text_len + 2000
             if is_substantially_different:
-                click.echo(
-                    "No section structure detected. "
-                    "Falling back to create mode with base as style reference."
+                out.info(
+                    "No section structure detected — "
+                    "falling back to create mode with base as style reference"
                 )
                 from .pandoc import run as pandoc_run
                 pandoc_run(
@@ -2941,7 +2947,7 @@ def run(
                 )
                 return
             else:
-                click.echo("No edits needed — copying base as-is.")
+                out.detail("No edits needed — copying base as-is")
                 if target.resolve() != output_path.resolve():
                     shutil.copy2(target, output_path)
                 return
@@ -2952,9 +2958,9 @@ def run(
             if m.action == "replace":
                 m.action = "unchanged"
         n_matched = sum(1 for m in mapping if m.docx_section is not None)
-        click.echo(
-            f"  Skipping AI edit plan — {n_matched} section(s) matched deterministically, "
-            f"applying targeted patches only."
+        out.detail(
+            f"Skipping AI edit plan — {n_matched} section(s) matched deterministically, "
+            f"applying targeted patches only"
         )
 
     if not edits and client is not None and not precompare_used:
@@ -2975,9 +2981,9 @@ def run(
         is_substantially_different = md_len > docx_text_len * 1.5 or md_len > docx_text_len + 2000
 
         if is_single_preamble and is_substantially_different:
-            click.echo(
-                "No section structure detected (no ATX headings in MD, no heading styles in DOCX). "
-                "Falling back to create mode with base as style reference."
+            out.info(
+                "No section structure detected (no ATX headings in MD, no heading styles in DOCX) "
+                "— falling back to create mode with base as style reference"
             )
             from .pandoc import run as pandoc_run
             pandoc_run(
@@ -2986,7 +2992,7 @@ def run(
             )
             return
 
-        click.echo("No edits needed — copying base as-is.")
+        out.detail("No edits needed — copying base as-is")
         if target.resolve() != output_path.resolve():
             shutil.copy2(target, output_path)
         return
@@ -2998,7 +3004,7 @@ def run(
 
         # 6. Summarize and confirm (AI, unless --accept-changes)
         if not accept_changes and client is not None:
-            click.echo("Generating change summary...")
+            out.step("Reviewing changes (AI)")
             summary = summarize_changes(client, mapping, edits)
             click.echo(f"\nPlanned changes:\n{summary}\n")
             if not click.confirm("Apply these changes?"):
@@ -3006,7 +3012,7 @@ def run(
                 sys.exit(0)
 
     # 7. Apply edits via XML surgery (edits may be empty in deterministic mode)
-    click.echo("Applying edits...")
+    out.step("Applying edits")
     modified_xml = _apply_edits(document_xml, edits)
 
     # 7a-pre. Remove LLM-generated headings + trailing content that duplicate
@@ -3055,7 +3061,7 @@ def run(
             modified_xml = etree.tostring(
                 _root, xml_declaration=True, encoding="UTF-8", standalone=True
             )
-            click.echo(f"  Removed {len(_dup_remove)} LLM-duplicated element(s) from edited section(s)")
+            out.detail(f"Removed {len(_dup_remove)} LLM-duplicated element(s) from edited section(s)")
             # Re-parse after modification
             _root = etree.fromstring(modified_xml)
             _body = _root.find(f"{{{_W}}}body")
@@ -3206,7 +3212,7 @@ def run(
             modified_xml = etree.tostring(
                 _root, xml_declaration=True, encoding="UTF-8", standalone=True
             )
-            click.echo(f"  Removed {_dedup_count} duplicate paragraph(s)")
+            out.detail(f"Removed {_dedup_count} duplicate paragraph(s)")
 
     # 7a-rename. Apply heading renames detected by pre-comparison.
     # Updates w:t text in heading paragraphs from old to new heading text.
@@ -3235,15 +3241,15 @@ def run(
             modified_xml = etree.tostring(
                 _root, xml_declaration=True, encoding="UTF-8", standalone=True
             )
-            click.echo(f"  Renamed {_renames_applied} heading(s)")
+            out.detail(f"Renamed {_renames_applied} heading(s)")
 
     # 7b. Post-LLM bullet style injection
     modified_xml, bullets_styled = _inject_bullet_styles(modified_xml, mapping, docx_path=target)
     if bullets_styled:
-        click.echo(f"  Injected bullet style on {bullets_styled} paragraph(s)")
+        out.detail(f"Injected bullet style on {bullets_styled} paragraph(s)")
 
     # 7c. Options B, C, D: patch unchanged sections (bullets, text corrections, table rows)
-    click.echo("Patching unchanged sections...")
+    out.step("Patching unchanged sections")
     modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed, bullets_removed, bold_applied = _apply_patches(modified_xml, mapping, full_md=md_text)
     if bullets_added or bullets_removed or corrections_made or bold_applied or rows_updated or rows_inserted or rows_removed:
         parts = [
@@ -3258,7 +3264,7 @@ def run(
             parts.append(f"{bullets_removed} stale bullet(s) removed")
         if bold_applied:
             parts.append(f"{bold_applied} bold span(s) applied")
-        click.echo(f"  Patches: {', '.join(parts)}")
+        out.detail(f"Patches: {', '.join(parts)}")
 
     # 7d. Post-patch bullet-order enforcement: reorder list paragraphs to
     # match source MD bullet order. Handles both LLM-reordered sections and
@@ -3271,7 +3277,7 @@ def run(
             modified_xml = etree.tostring(
                 _root, xml_declaration=True, encoding="UTF-8", standalone=True
             )
-            click.echo(f"  Reordered bullets in {_reorder_count} section(s) to match source")
+            out.detail(f"Reordered bullets in {_reorder_count} section(s) to match source")
 
     # Whole-document XML validation before writing
     _validate_document_xml(modified_xml)

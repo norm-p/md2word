@@ -18,6 +18,7 @@ import click
 
 from .ai.interpret import interpret
 from .validate import extract_docx_text, validate_output
+from . import output as out
 
 _VERSION_RE = re.compile(r"^(.+?)(?:_v(\d{3,}))$")
 
@@ -136,7 +137,7 @@ def main(
     result = interpret(input_md.read_text(encoding="utf-8"), has_base=base is not None)
 
     if verbose:
-        click.echo(f"Mode: {result.mode} — {result.rationale}")
+        out.verbose(f"Mode: {result.mode} — {result.rationale}", True)
 
     # 2. Resolve output path
     if overwrite and output is not None:
@@ -154,20 +155,20 @@ def main(
             output = input_md.with_suffix(".docx")
 
     if verbose:
-        click.echo(f"Output: {output}")
+        out.verbose(f"Output: {output}", True)
 
     # 3. Read base text (for verbose only now, xml_edit reads it internally)
     if base is not None:
         if not base.exists():
-            click.echo(f"Error: base file not found: {base}", err=True)
+            out.error(f"Base file not found: {base}")
             sys.exit(1)
         if verbose:
-            click.echo(f"Reading base document: {base}")
+            out.verbose(f"Reading base document: {base}", True)
 
     # 4. Select approach
     approach = _detect_approach(result.mode, output)
     if verbose:
-        click.echo(f"Approach: {approach}")
+        out.verbose(f"Approach: {approach}", True)
 
     # 5. Dispatch
     _dispatch(
@@ -183,7 +184,7 @@ def main(
 
     # 6. Validate
     validate_output(output)
-    click.echo(f"Done: {output}")
+    out.success(f"Done: {output}")
 
 
 def _dispatch(

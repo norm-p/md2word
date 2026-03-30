@@ -13,6 +13,8 @@ from pathlib import Path
 
 import click
 
+from .. import output as out
+
 
 def _wsl_to_windows(p: Path) -> str:
     """Convert a Linux path to a Windows path when running on WSL with a .exe pandoc."""
@@ -59,10 +61,10 @@ def _ensure_pandoc() -> str:
         return "pandoc"
 
     # 3. Auto-download
-    click.echo("Pandoc not found — downloading automatically (one-time setup)...")
+    out.info("Pandoc not found — downloading automatically (one-time setup)")
     import pypandoc
     pypandoc.download_pandoc()
-    click.echo("Pandoc installed successfully.")
+    out.detail("Pandoc installed successfully")
     return "pandoc"
 
 
@@ -86,9 +88,9 @@ def run(
         extra_args.append("--toc")
 
     if verbose:
-        click.echo(f"Running pandoc: {input_path} -> {output_path}")
+        out.verbose(f"Running pandoc: {input_path} -> {output_path}", True)
         if extra_args:
-            click.echo(f"  extra_args: {extra_args}")
+            out.verbose(f"extra_args: {extra_args}", True)
 
     # When pandoc is a Windows .exe on WSL, pypandoc can't pass Linux paths
     # (it validates os.path.exists before calling pandoc, and pandoc.exe
