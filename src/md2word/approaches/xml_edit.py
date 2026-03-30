@@ -2613,6 +2613,40 @@ def _validate_round_trip(source_md: str, output_path: Path) -> None:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _fallback_to_create(
+    input_path: Path,
+    output_path: Path,
+    target: Path,
+    verbose: bool,
+    accept_changes: bool,
+    reason: str,
+    match_pct: str,
+) -> bool:
+    """Prompt user and fall back to create mode with base as style reference.
+
+    Returns True if the fallback was executed (caller should return early),
+    False if the user declined (caller should continue with update pipeline).
+    """
+    click.echo(
+        f"  Documents appear too different for update mode ({match_pct} match)."
+    )
+    click.echo(f"  Reason: {reason}")
+    if accept_changes:
+        click.echo("  Creating new document with base styling (--accept-changes).")
+        proceed = True
+    else:
+        proceed = click.confirm(
+            "  Fall back to create mode using base document for styling?",
+            default=True,
+        )
+    if not proceed:
+        return False
+    click.echo(f"Converting {input_path.name} → {output_path.name} (create mode with style reference)...")
+    from .pandoc import run as pandoc_run
+    pandoc_run(input_path, output_path, ref_doc=target, toc=False, verbose=verbose)
+    return True
+
+
 def run(
     input_path: Path,
     output_path: Path,
@@ -2706,6 +2740,17 @@ def run(
             f"{n_minor} minor edit, {n_major} major change, {n_new} new"
             + (f", {n_renamed} heading rename(s)" if n_renamed else "")
         )
+
+        # Primary divergence check: if very few sections match and most are
+        # new, the documents are too different for update mode.
+        n_matched = n_identical + n_minor
+        if _reliability < 0.25 and n_new > n_matched and len(_diffs) >= 3:
+            if _fallback_to_create(
+                input_path, output_path, target, verbose, accept_changes,
+                reason=f"{n_new} new sections vs {n_matched} matching",
+                match_pct=f"{_reliability:.0%}",
+            ):
+                return
 
         if _reliability >= 0.50:
             precompare_used = True
@@ -2809,6 +2854,39 @@ def run(
                 f"  '{md_h}' -> {m.action}"
                 + (f" ('{docx_h}')" if m.docx_section else "")
             )
+
+    # Secondary divergence check (post-mapping): catch cases where
+    # pre-compare wasn't available or didn't trigger the primary check.
+    # Fires when most sections are inserts and replace sections have low similarity.
+    if len(mapping) >= 3:
+        n_insert = sum(1 for m in mapping if m.action == "insert")
+        insert_ratio = n_insert / len(mapping)
+        if insert_ratio > 0.60:
+            # Compute average similarity for replace mappings
+            replace_sims: list[float] = []
+            for m in mapping:
+                if m.action == "replace" and m.docx_section is not None:
+                    md_n = _normalize_text(m.md_content)
+                    dx_n = _normalize_text(
+                        _extract_docx_section_text(m.docx_section.xml_fragment)
+                    )
+                    if md_n and dx_n:
+                        from difflib import SequenceMatcher
+                        replace_sims.append(
+                            SequenceMatcher(None, md_n, dx_n, autojunk=False).ratio()
+                        )
+            avg_sim = sum(replace_sims) / len(replace_sims) if replace_sims else 0.0
+            if avg_sim < 0.30:
+                overall_pct = f"{(1 - insert_ratio):.0%}"
+                if _fallback_to_create(
+                    input_path, output_path, target, verbose, accept_changes,
+                    reason=(
+                        f"{n_insert}/{len(mapping)} sections unmatched, "
+                        f"matched sections avg {avg_sim:.0%} similar"
+                    ),
+                    match_pct=overall_pct,
+                ):
+                    return
 
     # 4. Build edit plan (AI, batched) — skip in deterministic-only mode
     edits: list[Edit] = []
