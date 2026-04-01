@@ -202,3 +202,11 @@ The LLM prompt in `ai/edit_plan.py` has these known gaps that contribute to open
 - No duplicate-heading prevention — LLM can emit the section heading twice
 - No smart-quote guidance — LLM may normalize or alter quote characters
 - Table reconstruction is blind — LLM gets `has_tables: true` + 150-char preview, not structure
+
+## Clarifying Questions
+
+Always use the `AskUserQuestion` control to prompt the user with questions. Do not ask questions in prose.
+
+## Clarifying Questions
+
+Always use the `AskUserQuestion` control to prompt the user with questions. Do not ask questions in prose.
