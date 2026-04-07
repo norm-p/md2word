@@ -41,8 +41,8 @@ def _ensure_pandoc() -> str:
     import shutil
 
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
+        from md2word.ai.client import load_env
+        load_env()
     except ImportError:
         pass
 

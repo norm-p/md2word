@@ -1846,6 +1846,212 @@ def _patch_text_corrections(
 
 
 # ---------------------------------------------------------------------------
+# Option C+insert — Insert MD body lines that have no DOCX counterpart
+# ---------------------------------------------------------------------------
+
+
+def _patch_orphan_body_lines(
+    body: etree._Element,
+    section_elements: list[etree._Element],
+    md_content: str,
+    match_threshold: float = 0.75,
+) -> int:
+    """Insert MD body lines (non-bullet, non-heading) that have no DOCX match.
+
+    Companion to _patch_text_corrections. _patch_text_corrections walks DOCX
+    paragraphs and rewrites their text to match MD lines, but it never inserts
+    new paragraphs. When the source MD adds a new body line within an
+    otherwise-unchanged section (e.g. a new name in a contact list), the line
+    is silently dropped because no DOCX paragraph claims it.
+
+    This function walks the MD body lines, finds those with no close match in
+    the section's existing body paragraphs, and inserts them as new w:p
+    elements cloned from the nearest neighbor paragraph (preserving style).
+    Insertion order follows MD source order via a per-MD-line element map.
+
+    Returns the number of paragraphs inserted.
+    """
+    from difflib import SequenceMatcher
+
+    def _norm_match(s: str) -> str:
+        # Comparison-only normalizer: lowercase and collapse runs of filler
+        # characters (backslashes, underscores, dashes, dots, spaces) so that
+        # MD escape sequences (\_\_\_) match DOCX backslash runs (\\\\\\) and
+        # form-fill placeholders compare equal regardless of length.
+        s = s.lower()
+        s = re.sub(r"[\\_\-.\s]{2,}", " ", s)
+        return s.strip()
+
+    # Collect MD body lines (skip blanks, headings, bullets, table rows).
+    md_lines: list[tuple[str, str]] = []  # (raw_for_insert, norm_for_match)
+    for line in md_content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _MD_BULLET_RE.match(line):
+            continue
+        # Skip numbered list items (e.g. "1. foo", "2) bar"). These are
+        # rendered as DOCX list paragraphs (numPr) and excluded from
+        # body_chunks; treating them as body lines causes spurious inserts.
+        if re.match(r"^\d+[.)]\s", stripped):
+            continue
+        if stripped.startswith("|"):
+            continue
+        cleaned = _clean_md_inline(stripped)
+        if cleaned:
+            md_lines.append((cleaned, _norm_match(cleaned)))
+
+    if not md_lines:
+        return 0
+
+    # Collect non-list, non-heading body "chunks" in section, in order.
+    # A chunk is one logical text line. Paragraphs split on <w:br/> soft
+    # line breaks contribute multiple chunks but share their containing
+    # paragraph element (used as insertion anchor).
+    # (elem, cleaned, norm, has_sdt) — has_sdt paras are usable for matching
+    # but unsafe as insertion templates (cloning + text rewrite would
+    # duplicate against the SDT-stored value).
+    body_chunks: list[tuple[etree._Element, str, str, bool]] = []
+    for elem in section_elements:
+        if elem.tag != f"{{{_W}}}p":
+            continue
+        if _para_heading_text(elem) is not None:
+            continue
+        if _is_list_para(elem):
+            continue
+        has_sdt = elem.find(f".//{{{_W}}}sdt") is not None
+        # Walk all descendants in document order so we pick up w:t nested
+        # inside w:hyperlink (and other wrappers), not just direct w:r/w:t.
+        parts: list[str] = [""]
+        for desc in elem.iter():
+            if desc.tag == f"{{{_W}}}t":
+                parts[-1] += desc.text or ""
+            elif desc.tag == f"{{{_W}}}br":
+                parts.append("")
+        for part in parts:
+            cleaned = _clean_md_inline(part.strip())
+            if cleaned:
+                body_chunks.append((elem, cleaned, _norm_match(cleaned), has_sdt))
+
+    if not body_chunks:
+        return 0
+
+    # If MD has no more body lines than DOCX already has, nothing to insert.
+    if len(md_lines) <= len(body_chunks):
+        return 0
+
+    # Skip mixed-content sections containing tables: orphan anchoring across
+    # tables is unreliable (text lines after a table in MD must land after
+    # the table in DOCX, but our chunk-based anchoring can't see the table).
+    if any(e.tag == f"{{{_W}}}tbl" for e in section_elements):
+        return 0
+
+    # Build a global set of normalized paragraph texts across the entire
+    # document body. Used to suppress inserts where the line already exists
+    # outside the current section (Issue 2: MD section boundaries don't
+    # always match DOCX section boundaries — text "missing" from this
+    # section may actually live in the next one).
+    global_norms: set[str] = set()
+    for p in body.iter(f"{{{_W}}}p"):
+        ptext = "".join(t.text or "" for t in p.iter(f"{{{_W}}}t")).strip()
+        if ptext:
+            global_norms.add(_norm_match(_clean_md_inline(ptext)))
+
+    # For each MD line, find its best-matching body chunk.
+    md_elem: list[etree._Element | None] = [None] * len(md_lines)
+    used_bi: set[int] = set()
+    # Greedy: assign each MD line its best unique DOCX chunk above threshold.
+    # Sort MD line indices by descending best ratio so strongest matches win.
+    candidates: list[tuple[float, int, int]] = []  # (ratio, mi, bi)
+    for mi, (_raw, md_norm) in enumerate(md_lines):
+        for bi, (_p, _ptext, p_norm, _hsdt) in enumerate(body_chunks):
+            r = SequenceMatcher(
+                None, md_norm, p_norm, autojunk=False
+            ).ratio()
+            if r >= match_threshold:
+                candidates.append((r, mi, bi))
+    candidates.sort(reverse=True)
+    for _r, mi, bi in candidates:
+        if md_elem[mi] is not None or bi in used_bi:
+            continue
+        md_elem[mi] = body_chunks[bi][0]
+        used_bi.add(bi)
+
+    # Walk MD lines in order; insert any orphan after the previous mapped
+    # element (or before the next mapped element, or at section end).
+    inserted = 0
+    for mi, (md_text, _md_norm) in enumerate(md_lines):
+        if md_elem[mi] is not None:
+            continue
+        # Skip if the line already exists as a paragraph elsewhere in the
+        # document — likely a section-boundary mismatch, not a real orphan.
+        if _md_norm in global_norms:
+            continue
+
+        anchor = None
+        for pj in range(mi - 1, -1, -1):
+            if md_elem[pj] is not None:
+                anchor = md_elem[pj]
+                break
+        following = None
+        if anchor is None:
+            for pj in range(mi + 1, len(md_lines)):
+                if md_elem[pj] is not None:
+                    following = md_elem[pj]
+                    break
+
+        # Pick the first non-SDT body chunk as a safe template for cloning.
+        # SDT-bearing paragraphs would duplicate text against the stored
+        # SDT value if cloned and rewritten.
+        safe_templates = [c[0] for c in body_chunks if not c[3]]
+        if not safe_templates:
+            # No usable template — bail rather than clone an SDT paragraph.
+            continue
+        # Prefer the anchor element as template if it's safe; otherwise
+        # use the first safe body chunk for styling.
+        if anchor is not None and anchor in safe_templates:
+            template = anchor
+        elif following is not None and following in safe_templates:
+            template = following
+        else:
+            template = safe_templates[0]
+
+        new_para = copy.deepcopy(template)
+        runs = new_para.findall(f"{{{_W}}}r")
+        if not runs:
+            continue
+        first_run = runs[0]
+        t_elems = first_run.findall(f"{{{_W}}}t")
+        if t_elems:
+            t_elems[0].text = md_text
+            t_elems[0].set(
+                "{http://www.w3.org/XML/1998/namespace}space", "preserve"
+            )
+            for extra in t_elems[1:]:
+                first_run.remove(extra)
+        else:
+            t = etree.SubElement(first_run, f"{{{_W}}}t")
+            t.text = md_text
+            t.set(
+                "{http://www.w3.org/XML/1998/namespace}space", "preserve"
+            )
+        for extra_r in runs[1:]:
+            new_para.remove(extra_r)
+
+        if anchor is not None:
+            body.insert(list(body).index(anchor) + 1, new_para)
+        elif following is not None:
+            body.insert(list(body).index(following), new_para)
+        else:
+            body.insert(list(body).index(body_chunks[-1][0]) + 1, new_para)
+
+        md_elem[mi] = new_para
+        inserted += 1
+
+    return inserted
+
+
+# ---------------------------------------------------------------------------
 # Option C+bold — Apply **bold** emphasis from source MD to DOCX runs
 # ---------------------------------------------------------------------------
 
@@ -2078,7 +2284,7 @@ def _apply_patches(
     root = etree.fromstring(document_xml_bytes)
     body = root.find(f"{{{_W}}}body")
     if body is None:
-        return document_xml_bytes, 0, 0, 0, 0
+        return document_xml_bytes, 0, 0, 0, 0, 0, 0, 0, 0
 
     total_bullets = 0
     total_bullets_removed = 0
@@ -2087,6 +2293,7 @@ def _apply_patches(
     total_rows_updated = 0
     total_rows_inserted = 0
     total_rows_removed = 0
+    total_paras_inserted = 0
 
     for mapping in mappings:
         if mapping.action != "unchanged" or mapping.docx_section is None:
@@ -2125,6 +2332,19 @@ def _apply_patches(
         if corrections:
             total_corrections += corrections
             out.detail(f"Corrected {corrections} paragraph(s) in '{heading_text}'")
+
+        # Option C+insert: add MD body lines that have no DOCX counterpart.
+        orphans = _patch_orphan_body_lines(body, section_elements, mapping.md_content)
+        if orphans:
+            total_paras_inserted += orphans
+            out.detail(f"Inserted {orphans} new paragraph(s) in '{heading_text}'")
+            # Refresh section_elements after insertion so downstream
+            # patches see the new paragraphs.
+            try:
+                start_idx, end_idx = _find_section_range(body, heading_text)
+                section_elements = list(body)[start_idx:end_idx]
+            except ValueError:
+                pass
 
         # Option C+bold: apply **bold** emphasis from source MD
         bold_applied = _patch_bold_emphasis(section_elements, mapping.md_content)
@@ -2264,7 +2484,7 @@ def _apply_patches(
                     )
             i = sec_end
 
-    if total_bullets or total_bullets_removed or total_corrections or total_bold_applied or total_rows_updated or total_rows_inserted or total_rows_removed:
+    if total_bullets or total_bullets_removed or total_corrections or total_bold_applied or total_rows_updated or total_rows_inserted or total_rows_removed or total_paras_inserted:
         return (
             etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True),
             total_bullets,
@@ -2274,8 +2494,9 @@ def _apply_patches(
             total_rows_removed,
             total_bullets_removed,
             total_bold_applied,
+            total_paras_inserted,
         )
-    return document_xml_bytes, 0, 0, 0, 0, 0, 0, 0
+    return document_xml_bytes, 0, 0, 0, 0, 0, 0, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -2763,7 +2984,9 @@ def run(
                 if d.heading_renamed and d.base_heading is not None:
                     heading_renames[d.base_heading] = d.source_heading
             out.step("Mapping sections (pre-comparison)")
-            mapping = map_sections_precompare(_diffs, docx_sections)
+            mapping = map_sections_precompare(
+                _diffs, docx_sections, ai_available=client is not None
+            )
         else:
             out.info(
                 f"Pre-comparison unreliable ({_reliability:.0%} match) "
@@ -3250,14 +3473,16 @@ def run(
 
     # 7c. Options B, C, D: patch unchanged sections (bullets, text corrections, table rows)
     out.step("Patching unchanged sections")
-    modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed, bullets_removed, bold_applied = _apply_patches(modified_xml, mapping, full_md=md_text)
-    if bullets_added or bullets_removed or corrections_made or bold_applied or rows_updated or rows_inserted or rows_removed:
+    modified_xml, bullets_added, corrections_made, rows_updated, rows_inserted, rows_removed, bullets_removed, bold_applied, paras_inserted = _apply_patches(modified_xml, mapping, full_md=md_text)
+    if bullets_added or bullets_removed or corrections_made or bold_applied or rows_updated or rows_inserted or rows_removed or paras_inserted:
         parts = [
             f"{bullets_added} bullet(s) added",
             f"{corrections_made} text correction(s)",
             f"{rows_updated} table row(s) updated",
             f"{rows_inserted} table row(s) inserted",
         ]
+        if paras_inserted:
+            parts.append(f"{paras_inserted} paragraph(s) inserted")
         if rows_removed:
             parts.append(f"{rows_removed} stale table row(s) removed")
         if bullets_removed:

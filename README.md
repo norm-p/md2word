@@ -34,17 +34,6 @@ Copy `.env.example` to `.env` and set `AI_PROVIDER`, `AI_MODEL`, and the matchin
 
 Without a configured provider (or without the AI SDK installed), update mode runs in deterministic-only mode (see below).
 
-## Quick start
-
-Try it on this README:
-
-```bash
-uv run md2word README.md
-uv run md2word README-demo_v2.md README.docx --accept-changes
-```
-
-The first command creates `README.docx`. The second updates it from the revised Markdown, producing `README_v001.docx` with the changes applied.
-
 ## Usage
 
 ```bash

@@ -16,6 +16,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -139,11 +140,26 @@ def get_client_or_none() -> LLMClient | None:
         return None
 
 
-def get_client() -> LLMClient:
-    """Build and return an LLMClient from environment variables."""
+def load_env() -> None:
+    """Load .env from cwd (default search) and, as a fallback, from the
+    directory containing the running executable. This makes the frozen exe
+    pick up a sibling .env regardless of where the user invoked it from."""
     from dotenv import load_dotenv
 
     load_dotenv()
+    try:
+        import sys
+        exe_dir = Path(sys.executable).resolve().parent
+        env_path = exe_dir / ".env"
+        if env_path.is_file():
+            load_dotenv(env_path, override=False)
+    except Exception:
+        pass
+
+
+def get_client() -> LLMClient:
+    """Build and return an LLMClient from environment variables."""
+    load_env()
 
     provider = os.getenv("AI_PROVIDER", "anthropic")
     model = os.environ["AI_MODEL"]

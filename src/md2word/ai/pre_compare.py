@@ -185,9 +185,29 @@ def pre_compare_overall_similarity(diffs: list[SectionDiff]) -> float:
     return ok / len(diffs)
 
 
+def _count_body_lines(content: str) -> int:
+    """Count non-blank, non-heading, non-bullet, non-table body lines."""
+    if not content:
+        return 0
+    count = 0
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith(("-", "*", "+")) and len(stripped) > 1 and stripped[1] == " ":
+            continue
+        if re.match(r"^\d+[.)]\s", stripped):
+            continue
+        if stripped.startswith("|"):
+            continue
+        count += 1
+    return count
+
+
 def map_sections_precompare(
     diffs: list[SectionDiff],
     docx_sections: list[DocxSection],
+    ai_available: bool = False,
 ) -> list[SectionMapping]:
     """Convert pre-comparison diffs into SectionMapping list.
 
@@ -237,7 +257,22 @@ def map_sections_precompare(
             action: Literal["insert", "replace", "unchanged"] = "unchanged"
         elif diff.action == "minor_edit":
             # Deterministic patches (Options B/C/D) handle minor edits.
-            action = "unchanged"
+            # When AI is available, promote to "replace" if the source has
+            # more body paragraphs than the base — the deterministic patcher
+            # cannot insert arbitrary new paragraphs reliably for every case,
+            # and the LLM is more reliable when available. In deterministic
+            # mode, leave as "unchanged" so _patch_orphan_body_lines handles
+            # the insertion.
+            if (
+                ai_available
+                and diff.base_content is not None
+                and _count_body_lines(diff.source_content)
+                > _count_body_lines(diff.base_content)
+                and docx_sec is not None
+            ):
+                action = "replace"
+            else:
+                action = "unchanged"
         elif diff.action == "major_change":
             action = "replace" if docx_sec is not None else "insert"
         elif diff.action == "new":

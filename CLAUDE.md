@@ -130,6 +130,36 @@ the LLM-generated content if the LLM produced none:
 Re-appended elements are placed after new content in this order: drawings first, then tables.
 A warning is echoed to the console when tables are rescued.
 
+### Orphan body-line insertion (`approaches/xml_edit.py`)
+`_patch_orphan_body_lines()` runs in the deterministic patch loop after
+`_patch_text_corrections()`. The text corrector only rewrites existing
+paragraphs in place and never adds new ones, so a source MD line that has no
+DOCX counterpart (e.g. a new name added to a contact list) is silently lost.
+The orphan patcher fixes this by walking each section's MD body lines (skip
+blanks, ATX headings, `-/*/+` bullets, `1.`/`1)` numbered items, table rows),
+matching them against DOCX "chunks" (paragraphs split on `<w:br/>` soft line
+breaks; text inside `<w:hyperlink>` and `<w:sdtContent>` is included via
+`elem.iter()`), and inserting any unmatched MD line as a new `w:p` cloned
+from the nearest neighbor paragraph.
+
+Guards against false-positive inserts:
+- Comparison-only normalizer collapses runs of `\ _ - . ` chars so
+  `Name: \_\_\_\_` (escaped underscores in MD) matches `Name: _____` in DOCX.
+- Sections containing tables are skipped entirely — anchoring text orphans
+  across `w:tbl` boundaries is unreliable (insertion lands on the wrong side).
+- Global dedup: before inserting, check if the normalized text already exists
+  as a paragraph anywhere in the document body. Catches Issue 2-style
+  section-boundary mismatches where the "missing" line actually lives in the
+  next DOCX section.
+- SDT-bearing paragraphs are usable as match targets but not as cloning
+  templates (cloning would duplicate the SDT-stored value).
+
+Companion to this in `ai/pre_compare.py`: when an LLM provider is configured
+(`ai_available=True`), `map_sections_precompare()` promotes a `minor_edit`
+section to `replace` if the source has more body paragraphs than the base, so
+the LLM regenerates it instead of relying on deterministic patches. In
+deterministic-only mode the orphan patcher handles the same case.
+
 ### Unchanged detection (`approaches/xml_edit.py`)
 `_sections_text_match()` compares normalized text between MD and DOCX. Threshold is **0.90**
 (sections with ≥90% text similarity are marked unchanged and never sent to the LLM). This

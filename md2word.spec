@@ -9,7 +9,13 @@ Build with:  pyinstaller md2word.spec
 import os
 import shutil
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 block_cipher = None
+
+# --- Collect magika model files (used by markitdown for file-type detection) ---
+magika_datas = collect_data_files("magika", include_py_files=False)
+markitdown_datas = collect_data_files("markitdown", include_py_files=False)
 
 # --- Locate pandoc binary ---------------------------------------------------
 pandoc_path = shutil.which("pandoc") or os.path.expandvars(
@@ -26,8 +32,9 @@ a = Analysis(
     ["md2word_entry.py"],
     pathex=["src"],
     binaries=[(pandoc_path, ".")],
-    datas=[],
+    datas=magika_datas + markitdown_datas,
     hiddenimports=[
+        "magika",
         # lxml internals PyInstaller often misses
         "lxml._elementpath",
         "lxml.etree",
